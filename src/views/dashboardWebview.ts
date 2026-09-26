@@ -649,6 +649,7 @@ export class DashboardWebviewPanel {
       stroke-width: 3.5;
       stroke-linecap: round;
       transition: stroke-dashoffset 0.8s ease-in-out, stroke 0.3s ease;
+      filter: drop-shadow(0 0 3px currentColor);
     }
 
     /* Activity History Section */

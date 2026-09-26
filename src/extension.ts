@@ -22,12 +22,16 @@ export function activate(context: vscode.ExtensionContext) {
   treeDataProvider = new QuotaTreeDataProvider(quotaService);
 
   // Register Tree View in Activity Bar
-  context.subscriptions.push(
-    vscode.window.registerTreeDataProvider(
-      'antigravityLimitMonitorView',
-      treeDataProvider
-    )
-  );
+  try {
+    context.subscriptions.push(
+      vscode.window.registerTreeDataProvider(
+        'badheshLimitMonitorView',
+        treeDataProvider
+      )
+    );
+  } catch (err) {
+    console.warn('Failed to register tree view, continuing activation...', err);
+  }
 
   // Register Commands
   context.subscriptions.push(

@@ -1,22 +1,22 @@
 {
-  "name": "antigravity-quota-autopilot",
-  "displayName": "Antigravity AI Quota & Auto-Accept Autopilot",
-  "description": "Real-time AI model quota monitor, hands-free auto-accept autopilot, and automated activity logger for Google Antigravity IDE.",
-  "version": "1.1.3",
-  "publisher": "san-chanadach",
-  "author": "San Chanadach",
+  "name": "badhesh-quota-tracker",
+  "displayName": "Badhesh AI Quota Tracker",
+  "description": "Custom real-time AI model quota monitor and autopilot for Google Antigravity IDE.",
+  "version": "1.0.8",
+  "publisher": "badheshchauhan",
+  "author": "Badhesh Chauhan",
   "license": "MIT",
   "sponsor": {
-    "url": "https://ko-fi.com/sanchanadach"
+    "url": "https://tools.badheshchauhan.com"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/San-chanadach/antigravity-quota-autopilot.git"
+    "url": "https://tools.badheshchauhan.com"
   },
   "bugs": {
-    "url": "https://github.com/San-chanadach/antigravity-quota-autopilot/issues"
+    "url": "https://tools.badheshchauhan.com"
   },
-  "homepage": "https://github.com/San-chanadach/antigravity-quota-autopilot#readme",
+  "homepage": "https://tools.badheshchauhan.com",
   "icon": "assets/icon.png",
   "engines": {
     "vscode": "^1.80.0"
@@ -24,7 +24,7 @@
   "categories": [
     "Other",
     "Visualization",
-    "Productivity"
+    "AI"
   ],
   "keywords": [
     "antigravity",
@@ -40,9 +40,6 @@
     "tracker"
   ],
   "main": "./dist/extension.js",
-  "activationEvents": [
-    "onStartupFinished"
-  ],
   "contributes": {
     "commands": [
       {
@@ -126,17 +123,18 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "antigravity-limit-monitor",
+          "id": "badhesh-limit-monitor",
           "title": "Model Limits",
           "icon": "assets/activity-icon.svg"
         }
       ]
     },
     "views": {
-      "antigravity-limit-monitor": [
+      "badhesh-limit-monitor": [
         {
-          "id": "antigravityLimitMonitorView",
-          "name": "Usage Limits"
+          "id": "badheshLimitMonitorView",
+          "name": "Usage Limits",
+          "icon": "assets/activity-icon.svg"
         }
       ]
     },
@@ -144,12 +142,12 @@
       "view/title": [
         {
           "command": "antigravityLimitMonitor.refresh",
-          "when": "view == antigravityLimitMonitorView",
+          "when": "view == badheshLimitMonitorView",
           "group": "navigation@1"
         },
         {
           "command": "antigravityLimitMonitor.showDashboard",
-          "when": "view == antigravityLimitMonitorView",
+          "when": "view == badheshLimitMonitorView",
           "group": "navigation@2"
         }
       ]
@@ -235,7 +233,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "build": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
-    "package": "vsce package --no-dependencies"
+    "package": "vsce package --no-dependencies --baseContentUrl https://tools.badheshchauhan.com --baseImagesUrl https://tools.badheshchauhan.com"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

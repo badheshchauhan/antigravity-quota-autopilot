@@ -33,18 +33,26 @@ export class QuotaTreeItem extends vscode.TreeItem {
         );
       } else {
         const pct = QuotaService.formatPercentage(bucket.remainingFraction);
-        this.description = `${pct}`;
-
+        
+        const totalBlocks = 8;
+        const filledBlocks = Math.round(bucket.remainingFraction * totalBlocks);
+        const emptyBlocks = totalBlocks - filledBlocks;
+        const bar = '█'.repeat(filledBlocks) + '░'.repeat(emptyBlocks);
+        
+        let extraDesc = bucket.window === 'weekly' ? '(W)' : '(D)';
+        
         if (bucket.resetTime) {
           const timeUntil = QuotaService.formatTimeUntilReset(bucket.resetTime);
-          this.description = `${pct} · resets in ${timeUntil}`;
+          this.description = `${bar} ${pct} ${extraDesc} ↻ ${timeUntil}`;
+        } else {
+          this.description = `${bar} ${pct} ${extraDesc}`;
         }
 
         // Icon based on percentage
-        if (bucket.remainingFraction >= 0.75) {
+        if (bucket.remainingFraction >= 0.50) {
           this.iconPath = new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('charts.green'));
-        } else if (bucket.remainingFraction >= 0.35) {
-          this.iconPath = new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('charts.yellow'));
+        } else if (bucket.remainingFraction >= 0.20) {
+          this.iconPath = new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('charts.blue'));
         } else {
           this.iconPath = new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('charts.red'));
         }
