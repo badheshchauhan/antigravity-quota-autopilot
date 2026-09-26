@@ -54,6 +54,15 @@ export class StatusBarManager implements vscode.Disposable {
     this.render();
   }
 
+
+  private toBoldNumbers(str: string): string {
+    const boldMap: { [key: string]: string } = {
+      '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰',
+      '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵'
+    };
+    return str.replace(/[0-9]/g, match => boldMap[match] || match);
+  }
+
   private applyColorToItem(item: vscode.StatusBarItem, lowestFraction: number, defaultColor: string) {
     const config = vscode.workspace.getConfiguration('antigravityLimitMonitor');
     const showAlertColors = config.get<boolean>('showStatusAlertColors', true);
@@ -119,7 +128,7 @@ export class StatusBarManager implements vscode.Disposable {
       }
       
       if (!daily && !weekly) return { text: '100%', minFrac: 1.0 };
-      return { text: `$(history) ${dStr}  $(calendar) ${wStr}`, minFrac };
+      return { text: `$(history) ${this.toBoldNumbers(dStr)}   $(calendar) ${this.toBoldNumbers(wStr)}`, minFrac };
     };
 
     const gData = getBothPct(gemini5h, geminiWeekly);

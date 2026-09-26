@@ -2,7 +2,7 @@
   "name": "badhesh-quota-tracker",
   "displayName": "Badhesh AI Quota Tracker",
   "description": "Custom real-time AI model quota monitor and autopilot for Google Antigravity IDE.",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "publisher": "badheshchauhan",
   "author": "Badhesh Chauhan",
   "license": "MIT",
