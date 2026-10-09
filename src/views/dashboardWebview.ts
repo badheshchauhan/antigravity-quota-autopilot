@@ -1998,8 +1998,7 @@ export class DashboardWebviewPanel {
 
       for (const g of quota.groups) {
         for (const b of g.buckets) {
-          if (b.disabled) continue;
-          const frac = typeof b.remainingFraction === 'number' ? b.remainingFraction : 1.0;
+          const frac = b.disabled ? 0 : (typeof b.remainingFraction === 'number' ? b.remainingFraction : 1.0);
           if (b.window === 'weekly') {
             totalWeeklyFrac += frac;
             countWeekly++;
@@ -2050,13 +2049,27 @@ export class DashboardWebviewPanel {
 
         for (const bucket of group.buckets) {
           if (bucket.disabled) {
-            html += '<div class="bucket-card" style="opacity: 0.65;">';
+            const resetStr = bucket.resetTime ? formatCountdown(bucket.resetTime) : '';
+            html += '<div class="bucket-card" style="opacity: 0.85; border-color: rgba(239, 68, 68, 0.3);">';
             html += '  <div class="bucket-left">';
             html += '    <div class="bucket-title-row">';
             html += '      <span class="bucket-name">' + bucket.displayName + '</span>';
-            html += '      <span class="bucket-window-badge">Disabled</span>';
+            html += '      <span class="bucket-window-badge" style="background: rgba(239, 68, 68, 0.2); color: var(--accent-red-bright);">0% Exhausted</span>';
             html += '    </div>';
             html += '    <div class="bucket-desc">' + (bucket.description || 'Weekly quota limit reached') + '</div>';
+            if (resetStr) {
+              html += '    <div class="bucket-reset-badge" style="color: var(--accent-red-bright);">';
+              html += '      <svg class="icon-svg" style="width:11px;height:11px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+              html += '      <span>Resets in ' + resetStr + '</span>';
+              html += '    </div>';
+            }
+            html += '  </div>';
+            html += '  <div class="gauge-wrap">';
+            html += '    <svg class="gauge-svg" viewBox="0 0 44 44">';
+            html += '      <circle class="gauge-track" cx="22" cy="22" r="18" />';
+            html += '      <circle class="gauge-progress" cx="22" cy="22" r="18" stroke-dasharray="' + circumference + '" stroke-dashoffset="' + circumference + '" stroke="var(--accent-red-bright)" />';
+            html += '    </svg>';
+            html += '    <div class="gauge-center-text" style="color: var(--accent-red-bright);">0%</div>';
             html += '  </div>';
             html += '</div>';
             continue;
@@ -2149,31 +2162,45 @@ export class DashboardWebviewPanel {
         const initial = (acc.name || acc.email).charAt(0).toUpperCase();
         const planText = (acc.plan || 'Free').toUpperCase();
 
-        // Model Balances Mini-bars
+        // Canonical Quota Limits Mini-bars (Gemini vs Non-Gemini)
         let balancesHtml = '';
         if (acc.balances && Object.keys(acc.balances).length > 0) {
-          const entries = Object.entries(acc.balances).slice(0, 3);
-          for (const [mKey, mVal] of entries) {
-            let val = 1.0;
+          let gVal: number | undefined;
+          let cVal: number | undefined;
+          for (const [mKey, mVal] of Object.entries(acc.balances)) {
+            let val = 100;
             if (typeof mVal === 'number') val = mVal;
-            else if (typeof mVal === 'object' && mVal && 'value' in mVal) val = mVal.value;
-            const pct = Math.round(val * 100);
-            const color = getColorForFraction(val);
-            const cleanName = mKey.replace(/[-_]/g, ' ').replace(/(gemini|claude)/gi, '').trim();
+            else if (typeof mVal === 'object' && mVal && 'value' in mVal) val = (mVal as any).value;
+            const pct = val > 1 ? Math.min(100, Math.max(0, Math.round(val))) : Math.round(val * 100);
+            const lower = mKey.toLowerCase();
+            if (lower.startsWith('chat') || lower.startsWith('tap') || lower.startsWith('tab')) continue;
+            if (lower.includes('claude') || lower.includes('sonnet') || lower.includes('opus') || lower.includes('gpt')) {
+              if (cVal === undefined || pct < cVal) cVal = pct;
+            } else if (lower.includes('gemini') || lower.includes('flash') || lower.includes('pro')) {
+              if (gVal === undefined || pct < gVal) gVal = pct;
+            }
+          }
+          const items = [];
+          if (gVal !== undefined) items.push({ name: 'Gemini (5h)', pct: gVal });
+          if (cVal !== undefined) items.push({ name: 'Claude (3P)', pct: cVal });
 
+          for (const item of items) {
+            const frac = item.pct / 100;
+            const color = getColorForFraction(frac);
             balancesHtml += \`
               <div class="balance-row">
-                <span class="balance-model-name">\${cleanName || mKey}</span>
+                <span class="balance-model-name">\${item.name}</span>
                 <div class="balance-bar-wrap">
                   <div class="mini-progress-track">
-                    <div class="mini-progress-fill" style="width: \${pct}%; background: \${color};"></div>
+                    <div class="mini-progress-fill" style="width: \${item.pct}%; background: \${color};"></div>
                   </div>
-                  <span class="balance-val" style="color: \${color};">\${pct}%</span>
+                  <span class="balance-val" style="color: \${color};">\${item.pct}%</span>
                 </div>
               </div>
             \`;
           }
-        } else {
+        }
+        if (!balancesHtml) {
           balancesHtml = '<div style="font-size: 11px; color: var(--text-dim); text-align: center;">No model quota cache available</div>';
         }
 

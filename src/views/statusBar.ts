@@ -134,13 +134,54 @@ export class StatusBarManager implements vscode.Disposable {
     const gData = getBothPct(gemini5h, geminiWeekly);
     const cData = getBothPct(claude5h, claudeWeekly);
 
+    const config = vscode.workspace.getConfiguration('antigravityLimitMonitor');
+    const format = config.get<string>('statusBarFormat', 'all');
+
+    if (format === 'geminiOnly') {
+      this.claudeStatusBarItem.hide();
+      this.geminiStatusBarItem.text = `$(sparkle) ${gData.text}`;
+      this.applyColorToItem(this.geminiStatusBarItem, gData.minFrac, 'charts.blue');
+      this.geminiStatusBarItem.tooltip = this.buildCombinedTooltip();
+      this.geminiStatusBarItem.show();
+      return;
+    }
+
+    if (format === 'fiveHourOnly') {
+      const g5hStr = gemini5h ? (gemini5h.disabled ? '0%' : QuotaService.formatPercentage(gemini5h.remainingFraction)) : '--';
+      const c5hStr = claude5h ? (claude5h.disabled || (claudeWeekly && claudeWeekly.remainingFraction <= 0) ? '0%' : QuotaService.formatPercentage(claude5h.remainingFraction)) : '--';
+      this.geminiStatusBarItem.text = `$(sparkle) ${this.toBoldNumbers(g5hStr)}`;
+      this.applyColorToItem(this.geminiStatusBarItem, gData.minFrac, 'charts.blue');
+      this.geminiStatusBarItem.tooltip = this.buildCombinedTooltip();
+
+      this.claudeStatusBarItem.text = `$(hubot) ${this.toBoldNumbers(c5hStr)}`;
+      this.applyColorToItem(this.claudeStatusBarItem, cData.minFrac, 'charts.purple');
+      this.claudeStatusBarItem.tooltip = this.buildCombinedTooltip();
+
+      this.geminiStatusBarItem.show();
+      this.claudeStatusBarItem.show();
+      return;
+    }
+
+    if (format === 'compact') {
+      const lowestFrac = Math.min(gData.minFrac, cData.minFrac);
+      const lowestPct = Math.round(lowestFrac * 100);
+      this.claudeStatusBarItem.hide();
+      this.geminiStatusBarItem.text = `$(sparkle) ${this.toBoldNumbers(lowestPct + '%')}`;
+      this.applyColorToItem(this.geminiStatusBarItem, lowestFrac, 'charts.blue');
+      this.geminiStatusBarItem.tooltip = this.buildCombinedTooltip();
+      this.geminiStatusBarItem.show();
+      return;
+    }
+
     this.geminiStatusBarItem.text = `$(sparkle) ${gData.text}`;
     this.applyColorToItem(this.geminiStatusBarItem, gData.minFrac, 'charts.blue');
     this.geminiStatusBarItem.tooltip = this.buildCombinedTooltip();
+    this.geminiStatusBarItem.show();
 
     this.claudeStatusBarItem.text = `$(hubot) ${cData.text}`;
     this.applyColorToItem(this.claudeStatusBarItem, cData.minFrac, 'charts.purple');
     this.claudeStatusBarItem.tooltip = this.buildCombinedTooltip();
+    this.claudeStatusBarItem.show();
   }
 
   public showQuotaError(err: Error): void {

@@ -54,8 +54,8 @@ export class AccountRepositoryImpl implements IAccountRepository {
     }
     const accounts = await this.getAllAccounts();
     
-    // Check if exists
-    const existingIndex = accounts.findIndex(a => a.email === data.email);
+    // Check if exists (case-insensitive)
+    const existingIndex = accounts.findIndex(a => a.email.toLowerCase() === data.email.toLowerCase());
     
     // Map Creation Data to Domain Model
     const newAccount: Account = {
@@ -99,7 +99,7 @@ export class AccountRepositoryImpl implements IAccountRepository {
 
   async removeAccount(email: string): Promise<void> {
     const accounts = await this.getAllAccounts();
-    const filtered = accounts.filter(a => a.email !== email);
+    const filtered = accounts.filter(a => a.email.toLowerCase() !== email.toLowerCase());
     await this.context.globalState.update(STORAGE_KEYS.ACCOUNTS_LIST, filtered);
 
     // Remove tokens securely
@@ -112,7 +112,7 @@ export class AccountRepositoryImpl implements IAccountRepository {
 
   async updateAccount(email: string, updates: Partial<Account>): Promise<void> {
     const accounts = await this.getAllAccounts();
-    const index = accounts.findIndex(a => a.email === email);
+    const index = accounts.findIndex(a => a.email.toLowerCase() === email.toLowerCase());
     
     if (index >= 0) {
       accounts[index] = { ...accounts[index], ...updates };

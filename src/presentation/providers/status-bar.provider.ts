@@ -21,8 +21,8 @@ export class StatusBarProvider implements vscode.Disposable {
     private accountRepo: IAccountRepository,
     private accountService: AccountService
   ) {
-    // Create item aligned to the right, priority 100 (pushes it to the far right)
-    this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    // Create item aligned to the right, priority 103 (neatly positioned with other Antigravity items)
+    this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 103);
     this.statusBarItem.command = 'antigravity-account.switchAccount';
     
     // Perform initial render
@@ -60,127 +60,57 @@ export class StatusBarProvider implements vscode.Disposable {
       return;
     }
 
-    // Build the display text: e.g., 🔄 ahmed@gmail.com | 💰 150/100/20
-    const displayName = activeAccount.alias || activeAccount.email.split('@')[0];
+    // Clean display name: e.g. $(account) badheshchauhan
+    const displayName = activeAccount.alias || activeAccount.name || activeAccount.email.split('@')[0];
+    this.statusBarItem.text = `$(account) ${displayName}`;
     
-    // Apply the same filtering/exclusion pipeline used in the main UI
-    const { models, credits } = this.filterBalances(activeAccount.balances);
-
-    // Build short credits text for the status bar
-    let creditsText = '?';
-    if (models.length > 0 || credits.length > 0) {
-      const allValues = [
-        ...credits.map(c => c.value),
-        ...models.map(m => m.value),
-      ];
-      creditsText = allValues.map(v => v.toLocaleString()).join('/');
+    // Build clean Markdown tooltip with summarized limits
+    const md = new vscode.MarkdownString();
+    md.isTrusted = true;
+    md.supportThemeIcons = true;
+    md.appendMarkdown(`### $(account) **${displayName}**\n\n`);
+    md.appendMarkdown(`- **Email:** \`${activeAccount.email}\`\n`);
+    if (activeAccount.plan && activeAccount.plan !== 'unknown') {
+      md.appendMarkdown(`- **Plan:** \`${activeAccount.plan.toUpperCase()}\`\n`);
     }
-    
-    this.statusBarItem.text = `$(hubot) ${displayName} | 💰 ${creditsText}`;
-    
-    // Build detailed tooltip with filtered models and credits
-    let balancesTooltip = 'No balance data';
-    if (models.length > 0 || credits.length > 0) {
-      const lines: string[] = [];
-      for (const c of credits) {
-        lines.push(`💳 ${c.key}: ${c.value.toLocaleString()}`);
-      }
-      for (const m of models) {
-        const resetInfo = m.resetTime ? ` (reset: ${new Date(m.resetTime).toLocaleDateString()})` : '';
-        lines.push(`🤖 ${m.key}: ${m.value}%${resetInfo}`);
-      }
-      balancesTooltip = lines.join('\n');
-    }
-      
-    this.statusBarItem.tooltip = `${activeAccount.email}\n${balancesTooltip}\n\n${i18n.t('statusBar.tooltip')}`;
 
-    // Apply color coding based on health status
+    // Summarize Gemini vs Claude limits if cached
+    if (activeAccount.balances && Object.keys(activeAccount.balances).length > 0) {
+      let geminiVal: number | undefined;
+      let claudeVal: number | undefined;
+      for (const [k, v] of Object.entries(activeAccount.balances)) {
+        const num = typeof v === 'number' ? v : (v && typeof v === 'object' && 'value' in v ? Number(v.value) : undefined);
+        if (num === undefined || isNaN(num)) continue;
+        const lower = k.toLowerCase();
+        if (lower.startsWith('chat') || lower.startsWith('tab') || lower.startsWith('tap')) continue;
+        if (lower.includes('claude') || lower.includes('sonnet') || lower.includes('opus') || lower.includes('gpt')) {
+          if (claudeVal === undefined || num < claudeVal) claudeVal = num;
+        } else if (lower.includes('gemini') || lower.includes('flash') || lower.includes('pro')) {
+          if (geminiVal === undefined || num > geminiVal) geminiVal = num;
+        }
+      }
+      if (geminiVal !== undefined || claudeVal !== undefined) {
+        md.appendMarkdown(`\n---\n\n**Quota Limits**\n\n`);
+        if (geminiVal !== undefined) {
+          md.appendMarkdown(`- **✨ Gemini (Google):** \`${geminiVal}%\`\n`);
+        }
+        if (claudeVal !== undefined) {
+          md.appendMarkdown(`- **🤖 Claude (3P):** \`${claudeVal}%\`\n`);
+        }
+      }
+    }
+
+    md.appendMarkdown(`\n[$(arrow-swap) Switch Account](command:antigravity-account.switchAccount) | [$(dashboard) Dashboard](command:antigravityLimitMonitor.showDashboard)\n`);
+    this.statusBarItem.tooltip = md;
+
+    // Apply color coding based on health status (only error if expired/ineligible)
     if (activeAccount.status === AccountStatus.DEPLETED || activeAccount.status === AccountStatus.ERROR || activeAccount.status === AccountStatus.TOKEN_EXPIRED) {
       this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
-    } else if (activeAccount.status === AccountStatus.LOW_BALANCE) {
-      this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else {
-      this.statusBarItem.backgroundColor = undefined; // Use default VS Code theme color
+      this.statusBarItem.backgroundColor = undefined; // Clean default theme color
     }
 
     this.statusBarItem.show();
-  }
-
-  /**
-   * Applies the same filtering/merging pipeline used in the main webview UI.
-   * This ensures the status bar tooltip shows only the same models visible in the extension panel.
-   * 
-   * Pipeline phases:
-   *   1. Separate credits (plain numbers) from models (objects with 'value')
-   *   2. Exclude by prefix: chat*, tap*, tab*, gpt*
-   *   3. Exclude gemini-2.5
-   *   4. Strip -low/-high suffixes and deduplicate
-   *   5. Unconditional exclusion of "lite" models
-   *   6. Claude version merging (same balance → "claude-{version}-All")
-   */
-  private filterBalances(balances: Record<string, any> | undefined): {
-    models: Array<{ key: string; value: number; resetTime?: string }>;
-    credits: Array<{ key: string; value: number }>;
-  } {
-    if (!balances || Object.keys(balances).length === 0) {
-      return { models: [], credits: [] };
-    }
-
-    const credits: Array<{ key: string; value: number }> = [];
-    const allModelEntries: Array<{ key: string; lowerKey: string; value: number; resetTime?: string }> = [];
-
-    // ── Phase 0: Collect and categorize ──
-    for (const [k, rawV] of Object.entries(balances)) {
-      if (!k) continue;
-      const lowerKey = k.toLowerCase();
-
-      if (typeof rawV === 'object' && rawV !== null && 'value' in rawV) {
-        // Model entry (from fetchAvailableModels)
-        allModelEntries.push({ key: k, lowerKey, value: rawV.value, resetTime: rawV.resetTime });
-        // Credit entry (plain number)
-        const value = typeof rawV === 'number' ? rawV : Number(rawV);
-        if (value > 0) {
-          credits.push({ key: k, value });
-        }
-      }
-    }
-
-    // ── Phase 1: Exclude by prefix (chat*, tap*, tab*) ──
-    const afterPrefixFilter = allModelEntries.filter(m =>
-      !m.lowerKey.startsWith('chat')
-      && !m.lowerKey.startsWith('tap')
-      && !m.lowerKey.startsWith('tab')
-    );
-
-    // ── Phase 2: Exclude gemini-2.5 ──
-    const afterGeminiFilter = afterPrefixFilter.filter(m => !m.lowerKey.includes('gemini-2.5'));
-
-    // ── Phase 3: Unconditional exclusion of "lite" models ──
-    const afterLiteFilter = afterGeminiFilter.filter(m => !m.lowerKey.match(/[-_\s]?lite$/i));
-
-    // ── Phase 4: Apply friendly names, filter deprecated, and deduplicate by friendly name ──
-    const friendlyModelMap = new Map<string, { key: string; value: number; resetTime?: string }>();
-    for (const m of afterLiteFilter) {
-      const friendlyName = getFriendlyModelName(m.key);
-      if (friendlyName) {
-        if (!friendlyModelMap.has(friendlyName)) {
-          friendlyModelMap.set(friendlyName, { key: friendlyName, value: m.value, resetTime: m.resetTime });
-        }
-      }
-    }
-
-    const models = Array.from(friendlyModelMap.values());
-    
-    models.sort((a, b) => {
-      const aCritical = a.value < 20;
-      const bCritical = b.value < 20;
-      if (aCritical && !bCritical) return 1;
-      if (!aCritical && bCritical) return -1;
-      if (a.value !== b.value) return b.value - a.value;
-      return 0;
-    });
-
-    return { models, credits };
   }
 
   /**

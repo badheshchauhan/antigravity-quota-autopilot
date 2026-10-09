@@ -494,13 +494,31 @@ function registerCommands(
 
       const items = accounts.map(a => {
         const isActive = activeEmailLower !== null && a.email.toLowerCase() === activeEmailLower;
-        let creditsStr = '?';
+        let quotaDesc = '';
         if (a.balances && Object.keys(a.balances).length > 0) {
-          creditsStr = Object.values(a.balances).join('/');
+          let geminiVal: number | undefined;
+          let claudeVal: number | undefined;
+          for (const [k, v] of Object.entries(a.balances)) {
+            const num = typeof v === 'number' ? v : (v && typeof v === 'object' && 'value' in v ? Number(v.value) : undefined);
+            if (num === undefined || isNaN(num)) continue;
+            const lower = k.toLowerCase();
+            if (lower.startsWith('chat') || lower.startsWith('tab') || lower.startsWith('tap')) continue;
+            if (lower.includes('claude') || lower.includes('sonnet') || lower.includes('opus')) {
+              if (claudeVal === undefined || num < claudeVal) claudeVal = num;
+            } else if (lower.includes('gemini') || lower.includes('flash') || lower.includes('pro')) {
+              if (geminiVal === undefined || num > geminiVal) geminiVal = num;
+            }
+          }
+          const parts: string[] = [];
+          if (geminiVal !== undefined) parts.push(`Gemini: ${geminiVal}%`);
+          if (claudeVal !== undefined) parts.push(`Claude: ${claudeVal}%`);
+          quotaDesc = parts.length > 0 ? parts.join(' | ') : 'Active';
+        } else {
+          quotaDesc = 'No quota cache';
         }
         return {
           label: `${isActive ? '✅ ' : ''}${a.displayName}`,
-          description: `${creditsStr} Credits`,
+          description: `${a.email} (${quotaDesc})`,
           email: a.email
         };
       });

@@ -123,8 +123,8 @@ export class StateDbService {
         rows.push({ key: STATE_DB_KEYS.TELEMETRY_LAST_SESSION_DATE, value: nowUtc });
       }
 
-      // ── Step 4: Spawn background worker + close window ──
-      const triggered = await this.triggerWorkerAndClose(account.email, dbPath, rows, deviceProfile, skipPrompt);
+      // ── Step 4: Inject directly into state.vscdb and reload window (NO closing and reopening IDE!) ──
+      const triggered = await this.triggerDirectInjectAndReload(account.email, dbPath, rows, deviceProfile, skipPrompt);
       return triggered ? 'success' : 'cancelled';
 
     } catch (error: any) {
@@ -137,7 +137,124 @@ export class StateDbService {
     }
   }
 
-  // ─── Worker-based injection ─────────────────────────────────────────────────
+  // ─── Direct In-Place Injection & Hot Reload (No App Close/Open) ───────────────
+
+  private async triggerDirectInjectAndReload(
+    email: string,
+    dbPath: string,
+    rows: Array<{ key: string; value: string | null }>,
+    deviceProfile?: DeviceProfile | null,
+    skipPrompt: boolean = false
+  ): Promise<boolean> {
+    const config = ExtensionConfig.getInstance();
+    const shouldPrompt = !skipPrompt && config.isConfirmOnSwitchEnabled();
+
+    if (shouldPrompt) {
+      const i18n = I18nService.getInstance();
+      const actionYes = i18n.t('switchPrompt.actionYes');
+      const actionNo = i18n.t('switchPrompt.actionNo');
+
+      const choice = await vscode.window.showInformationMessage(
+        i18n.t('switchPrompt.title', { email }),
+        {
+          modal: true,
+          detail: 'Switch active account and reload window in-place without closing Antigravity.',
+        },
+        actionYes,
+        actionNo
+      );
+
+      if (choice !== actionYes) {
+        Logger.getInstance().info('User cancelled account switch.');
+        return false;
+      }
+    } else {
+      Logger.getInstance().info(`Auto-switching to ${email} (in-place window reload)...`);
+    }
+
+    // Save open files before reloading
+    try {
+      const filesConfig = vscode.workspace.getConfiguration('files');
+      await vscode.workspace.saveAll(filesConfig.get<string>('autoSave') === 'off');
+    } catch (e) { /* best effort */ }
+
+    // Direct SQLite write using Python (or fallback to sql.js)
+    try {
+      this.writeRowsToDatabaseDirectly(dbPath, rows);
+    } catch (err: any) {
+      Logger.getInstance().warn(`Direct Python SQLite write failed: ${err.message}. Trying sql.js fallback...`);
+      try {
+        await this.writeRowsWithSqlJs(dbPath, rows);
+      } catch (sqlJsErr: any) {
+        Logger.getInstance().error(`sql.js write also failed: ${sqlJsErr.message}`);
+        return await this.triggerWorkerAndClose(email, dbPath, rows, deviceProfile, true);
+      }
+    }
+
+    if (deviceProfile) {
+      this.writeDeviceProfileToStorageJson(deviceProfile);
+    }
+
+    try {
+      await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+    } catch {}
+
+    Logger.getInstance().info(`Account state injected successfully for ${email}. Reloading window in-place...`);
+    vscode.commands.executeCommand('workbench.action.reloadWindow');
+    return true;
+  }
+
+  private writeRowsToDatabaseDirectly(dbPath: string, rows: Array<{ key: string; value: string | null }>): void {
+    const tempPayload = path.join(os.tmpdir(), `antigravity_switch_${Date.now()}.json`);
+    const tempScript = path.join(os.tmpdir(), `antigravity_switch_${Date.now()}.py`);
+    fs.writeFileSync(tempPayload, JSON.stringify({ dbPath, rows }), 'utf-8');
+    const pyCode = [
+      'import sqlite3, json, sys',
+      'payload_path = sys.argv[1]',
+      'with open(payload_path, "r", encoding="utf-8") as f:',
+      '    data = json.load(f)',
+      'db_path = data["dbPath"]',
+      'rows = data["rows"]',
+      'con = sqlite3.connect(db_path, timeout=15.0)',
+      'cur = con.cursor()',
+      'for r in rows:',
+      '    k = r["key"]',
+      '    v = r["value"]',
+      '    if v is None:',
+      '        cur.execute("DELETE FROM ItemTable WHERE key = ?", (k,))',
+      '    else:',
+      '        cur.execute("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)", (k, v))',
+      'con.commit()',
+      'con.close()'
+    ].join('\n');
+    fs.writeFileSync(tempScript, pyCode, 'utf-8');
+    try {
+      execSync(`python3 "${tempScript}" "${tempPayload}"`, { timeout: 10000 });
+      Logger.getInstance().info(`Direct SQLite write to ${dbPath} completed via python3`);
+    } finally {
+      try { if (fs.existsSync(tempPayload)) fs.unlinkSync(tempPayload); } catch {}
+      try { if (fs.existsSync(tempScript)) fs.unlinkSync(tempScript); } catch {}
+    }
+  }
+
+  private async writeRowsWithSqlJs(dbPath: string, rows: Array<{ key: string; value: string | null }>): Promise<void> {
+    const SQL = await this.getSqlJs();
+    const fileBuffer = fs.readFileSync(dbPath);
+    const db = new SQL.Database(fileBuffer);
+    for (const r of rows) {
+      if (r.value === null) {
+        db.run('DELETE FROM ItemTable WHERE key = ?', [r.key]);
+      } else {
+        db.run('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)', [r.key, r.value]);
+      }
+    }
+    const data = db.export();
+    fs.writeFileSync(dbPath, Buffer.from(data));
+    db.close();
+    Logger.getInstance().info(`Direct SQLite write to ${dbPath} completed via sql.js`);
+  }
+
+  // ─── Worker-based fallback injection ──────────────────────────────────────────
 
   private async triggerWorkerAndClose(
     email: string,
@@ -402,6 +519,8 @@ function findRelaunchExe() {
       '/usr/local/bin/antigravity-ide',
       '/usr/local/bin/antigravity',
       '/usr/share/antigravity/antigravity',
+      '/opt/antigravity/antigravity-ide',
+      '/opt/antigravity/bin/antigravity-ide',
       '/opt/Antigravity/antigravity',
       '/opt/antigravity/antigravity',
       '/opt/antigravity-ide/antigravity-ide',
@@ -657,6 +776,8 @@ inject().catch((err) => {
         '/usr/local/bin/antigravity-ide',
         '/usr/local/bin/antigravity',
         '/usr/share/antigravity/antigravity',
+        '/opt/antigravity/antigravity-ide',
+        '/opt/antigravity/bin/antigravity-ide',
         '/opt/Antigravity/antigravity',
         '/opt/antigravity/antigravity',
         '/opt/antigravity-ide/antigravity-ide',
@@ -857,7 +978,7 @@ inject().catch((err) => {
       const db = new SQL.Database(buf);
 
       try {
-        const stmt = db.prepare("SELECT key FROM ItemTable WHERE key LIKE '%secret://%davissss2.antigravity-account%refreshToken%'");
+        const stmt = db.prepare("SELECT key FROM ItemTable WHERE key LIKE '%secret://%antigravityAccount.secure.%refreshToken%'");
         const emails = new Set<string>();
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

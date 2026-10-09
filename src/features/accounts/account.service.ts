@@ -416,14 +416,12 @@ export class AccountService {
           let name: string = session.account?.label || 'User';
           let avatarUrl: string | undefined;
 
-          // Instant in-memory label resolution (0ms, avoids blocking network fetch)
+          // Instant in-memory label resolution (if label is already an email)
           if (session.account?.label) {
             const raw = session.account.label.trim().toLowerCase();
             const cleaned = raw.replace(/\s*\(.*?\)\s*/g, '').trim();
-            if (cleaned.includes('@')) {
+            if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned)) {
               email = cleaned;
-            } else if (cleaned.length > 0) {
-              email = `${cleaned}@gmail.com`;
             }
           }
 

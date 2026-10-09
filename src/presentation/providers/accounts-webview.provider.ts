@@ -207,7 +207,7 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
 
             if (shouldProceed) {
               try {
-                const result = await this.accountService.switchAccountWorkflow(message.email);
+                const result = await this.accountService.switchAccountWorkflow(message.email, { skipPrompt: true });
                 if (result !== 'success') {
                   await this.accountRepo.setPendingRefreshEmails([]);
                   this._view?.webview.postMessage({ command: 'accountSwitchCancelled', email: message.email });
@@ -5954,84 +5954,85 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
       `).join('') + `</div>`
       : '';
 
-    // Generate Models HTML
-    const modelsHtml = processedModels.length > 0
-      ? processedModels.map(m => {
-          const displayKey = m.key.endsWith('image')
-            ? `${m.key} <svg class="icon-svg icon-image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`
-            : m.key;
+    // Consolidate into the two canonical limit pools: Gemini (Google) vs Non-Gemini (Claude / 3P)
+    let geminiLimit: { name: string; tag: string; value: number; resetTime?: string } | null = null;
+    let claudeLimit: { name: string; tag: string; value: number; resetTime?: string } | null = null;
+
+    if (acc.balances) {
+      for (const [k, rawV] of Object.entries(acc.balances)) {
+        if (!k) continue;
+        const lowerKey = k.toLowerCase();
+        if (lowerKey.startsWith('chat') || lowerKey.startsWith('tap') || lowerKey.startsWith('tab')) continue;
+
+        let val: number;
+        let resetTime: string | undefined;
+        if (typeof rawV === 'object' && rawV !== null && 'value' in rawV) {
+          val = typeof (rawV as any).value === 'number' ? (rawV as any).value : Number((rawV as any).value);
+          resetTime = (rawV as any).resetTime;
+        } else if (typeof rawV === 'number') {
+          val = rawV;
+        } else {
+          continue;
+        }
+        if (isNaN(val)) continue;
+
+        if (lowerKey.includes('claude') || lowerKey.includes('sonnet') || lowerKey.includes('opus') || lowerKey.includes('gpt')) {
+          if (!claudeLimit || val < claudeLimit.value) {
+            claudeLimit = { name: 'Claude (Non-Gemini / 3P)', tag: 'Weekly / 5h Limit', value: val, resetTime };
+          }
+        } else if (lowerKey.includes('gemini') || lowerKey.includes('flash') || lowerKey.includes('pro')) {
+          if (!geminiLimit || val < geminiLimit.value) {
+            geminiLimit = { name: 'Gemini (Google AI)', tag: '5-Hour Limit', value: val, resetTime };
+          }
+        }
+      }
+    }
+
+    const limitsList: Array<{ name: string; tag: string; value: number; resetTime?: string }> = [];
+    if (geminiLimit) limitsList.push(geminiLimit);
+    if (claudeLimit) limitsList.push(claudeLimit);
+
+    // Generate Quota Limits HTML (clean 2-limit display)
+    const modelsHtml = limitsList.length > 0
+      ? limitsList.map(m => {
           const timeStr = formatTime(m.resetTime);
-          
           let colorClass = 'bg-high';
           let alertIcon = '';
-          
           if (m.value < 20) {
-              colorClass = 'bg-low';
-              alertIcon = ` <svg class="icon-svg icon-warning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" title="${i18n.t('webview.veryLowBalance')}"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
-          } else if (m.value < 32) {
-              colorClass = 'bg-low';
-          } else if (m.value < 60) {
-              colorClass = 'bg-med';
+            colorClass = 'bg-low';
+            alertIcon = ` <svg class="icon-svg icon-warning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" title="${i18n.t('webview.veryLowBalance')}"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
+          } else if (m.value < 50) {
+            colorClass = 'bg-med';
           }
-
           return `
-          <div class="model-card" data-model-key="${m.key}" onclick="selectModel(this, '${acc.email}', '${m.key}')" style="cursor: pointer;" title="${i18n.t('webview.selectThisModel')}">
-            <div class="model-header">
-              <span class="model-name">${displayKey}</span>
-              <span class="model-reset">${timeStr}</span>
+          <div class="model-card" style="padding: 10px 14px; margin-bottom: 8px;">
+            <div class="model-header" style="margin-bottom: 6px;">
+              <span class="model-name" style="font-weight: 600; font-size: 0.85rem;">${m.name} <span style="font-size: 0.72rem; color: var(--text-secondary); margin-left: 6px;">(${m.tag})</span></span>
+              <span class="model-reset" style="font-size: 0.75rem;">${timeStr}</span>
             </div>
-            <div class="progress-bar-container">
+            <div class="progress-bar-container" style="height: 6px; border-radius: 3px;">
               <div class="progress-bar ${colorClass}" style="width: ${m.value}%"></div>
             </div>
-            <div class="model-percentage ${colorClass}-text">${m.value}%${alertIcon}</div>
+            <div class="model-percentage ${colorClass}-text" style="font-size: 0.82rem; margin-top: 4px; font-weight: 600;">${m.value}%${alertIcon}</div>
           </div>
           `;
         }).join('')
       : `<div class="empty-models">${i18n.t('accounts.noAvailableModels')}</div>`;
 
     // Generate Collapse Header HTML
-    let collapseHeaderHtml = '';
     const wrapperId = `collapse-${acc.email.replace(/[@.]/g, '-')}`;
-    
-    if (preferredModelData) {
-       const displayKey = preferredModelData.key.endsWith('image')
-         ? `${preferredModelData.key} <svg class="icon-svg icon-image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`
-         : preferredModelData.key;
-       const timeStr = formatTime(preferredModelData.resetTime);
-       
-       let colorClass = 'bg-high';
-       let alertIcon = '';
-       
-       if (preferredModelData.value < 20) {
-           colorClass = 'bg-low';
-           alertIcon = ` <svg class="icon-svg icon-warning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" title="${i18n.t('webview.veryLowBalance')}"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
-       } else if (preferredModelData.value < 32) {
-           colorClass = 'bg-low';
-       } else if (preferredModelData.value < 60) {
-           colorClass = 'bg-med';
-       }
-
-       collapseHeaderHtml = `
-       <div class="collapse-header unified-collapse" onclick="toggleModels(this, '${wrapperId}')" title="${i18n.t('webview.showAvailableModels')}">
-          <span class="collapse-title">${i18n.t('accounts.models')}</span>
-          <div class="collapse-header-right">
-             <div class="pref-badge preferred-model-card" data-model-key="${preferredModelData.key}" onclick="event.stopPropagation(); selectModel(this, '${acc.email}', '${preferredModelData.key}')" title="${i18n.t('webview.activatePreferredModel')}">
-               <span class="pref-badge-name">${displayKey}</span>
-               <div class="pref-badge-bar"><div class="progress-bar ${colorClass}" style="width: ${preferredModelData.value}%"></div></div>
-               <span class="pref-badge-val ${colorClass}-text">${preferredModelData.value}%${alertIcon}</span>
-             </div>
-             <svg class="chevron-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+    const collapseHeaderHtml = `
+      <div class="collapse-header unified-collapse" onclick="toggleModels(this, '${wrapperId}')" title="Quota limits for Gemini vs Non-Gemini">
+        <span class="collapse-title">Quota Limits (5-Hour & Weekly)</span>
+        <div class="collapse-header-right">
+          <div style="display:flex; gap:8px; align-items:center;">
+            ${geminiLimit ? `<span class="pref-badge" style="font-size:0.75rem; padding:3px 8px; border-radius:12px; background:var(--bg-card-subtle);">✨ Gemini ${geminiLimit.value}%</span>` : ''}
+            ${claudeLimit ? `<span class="pref-badge" style="font-size:0.75rem; padding:3px 8px; border-radius:12px; background:${claudeLimit.value < 20 ? 'rgba(239,68,68,0.15)' : 'var(--bg-card-subtle)'}; color:${claudeLimit.value < 20 ? 'var(--accent-red)' : 'inherit'};">🤖 Claude ${claudeLimit.value}%</span>` : ''}
           </div>
-       </div>
-       `;
-    } else {
-       collapseHeaderHtml = `
-       <div class="collapse-header normal-collapse" onclick="toggleModels(this, '${wrapperId}')" title="${i18n.t('webview.showAvailableModels')}">
-          <span class="collapse-title">${i18n.t('accounts.availableModels', { count: processedModels.length })}</span>
           <svg class="chevron-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-       </div>
-       `;
-    }
+        </div>
+      </div>
+    `;
 
     const isExpired = acc.status === AccountStatus.TOKEN_EXPIRED;
     const isIneligible = acc.status === AccountStatus.INELIGIBLE;

@@ -485,7 +485,8 @@ export class AutoAcceptService extends EventEmitter implements vscode.Disposable
               res.alreadyPatched++;
               res.totalFound++;
             } else {
-              const updated = content.replace(/^(Exec=[^\r\n]+)$/m, (line) => {
+              const updated = content.replace(/^(Exec=[^\r\n]+)$/gm, (line) => {
+                if (line.includes(flag)) return line;
                 if (/\s+%[A-Za-z]\s*$/.test(line)) {
                   return line.replace(/(\s+%[A-Za-z]\s*)$/, ` ${flag}$1`);
                 }
