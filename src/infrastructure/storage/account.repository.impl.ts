@@ -1,0 +1,332 @@
+/**
+ * Account Repository Implementation
+ *
+ * Concrete implementation of IAccountRepository.
+ * Uses VS Code `globalState` for non-sensitive data,
+ * and `SecretStorage` for OAuth tokens.
+ */
+
+import * as vscode from 'vscode';
+import { IAccountRepository } from '../../core/domain/repositories/account.repository';
+import { Account, AccountCreationData, AccountTokens, AccountSummary } from '../../core/domain/models/account.model';
+import { DeviceProfile } from '../../core/domain/models/device-profile.model';
+import { Workflow } from '../../core/domain/models/workflow.model';
+import { STORAGE_KEYS, SECRET_KEYS } from '../../core/constants/app.constants';
+import { Logger } from '../../core/utils/logger';
+
+export class AccountRepositoryImpl implements IAccountRepository {
+  constructor(private context: vscode.ExtensionContext) {}
+
+  async getAllAccounts(): Promise<Account[]> {
+    const raw = this.context.globalState.get<Account[]>(STORAGE_KEYS.ACCOUNTS_LIST, []);
+    const isValidEmail = (email: any): boolean =>
+      typeof email === 'string' && email.includes('@') && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+
+    const valid = raw.filter(a => a && isValidEmail(a.email));
+    if (valid.length !== raw.length) {
+      const removedCount = raw.length - valid.length;
+      Logger.getInstance().warn(`[AccountRepo] Purged ${removedCount} malformed/non-email account(s) from globalState.`);
+      await this.context.globalState.update(STORAGE_KEYS.ACCOUNTS_LIST, valid);
+
+      // Clean up orphaned secrets for invalid accounts
+      for (const invalidAcc of raw) {
+        if (!isValidEmail(invalidAcc?.email) && invalidAcc?.email) {
+          try {
+            await this.context.secrets.delete(SECRET_KEYS.REFRESH_TOKEN(invalidAcc.email));
+            await this.context.secrets.delete(SECRET_KEYS.ACCESS_TOKEN(invalidAcc.email));
+            await this.context.secrets.delete(SECRET_KEYS.METADATA(invalidAcc.email));
+          } catch {}
+        }
+      }
+    }
+    return valid;
+  }
+
+  async getAccount(email: string): Promise<Account | null> {
+    if (!email || !email.includes('@')) return null;
+    const accounts = await this.getAllAccounts();
+    return accounts.find(a => a.email.toLowerCase() === email.toLowerCase()) || null;
+  }
+
+  async saveAccount(data: AccountCreationData): Promise<Account> {
+    if (!data.email || !data.email.includes('@') || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim())) {
+      throw new Error(`[AccountRepo] Cannot save account with invalid email: '${data.email}'`);
+    }
+    const accounts = await this.getAllAccounts();
+    
+    // Check if exists
+    const existingIndex = accounts.findIndex(a => a.email === data.email);
+    
+    // Map Creation Data to Domain Model
+    const newAccount: Account = {
+      email: data.email,
+      name: data.name,
+      avatarUrl: data.avatarUrl,
+      projectId: data.projectId,
+      plan: 'unknown' as any, // Will be updated later by API
+      status: 'active' as any,
+      balances: {},
+      addedAt: new Date().toISOString(),
+      isActive: false,
+      hasDeviceProfile: false,
+      workflow: data.workflow,
+    };
+
+    if (existingIndex >= 0) {
+      // Keep existing data (like alias), update core info
+      accounts[existingIndex] = {
+        ...accounts[existingIndex],
+        ...newAccount,
+        workflow: data.workflow !== undefined ? data.workflow : accounts[existingIndex].workflow,
+        addedAt: accounts[existingIndex].addedAt
+      };
+    } else {
+      accounts.push(newAccount);
+    }
+
+    await this.context.globalState.update(STORAGE_KEYS.ACCOUNTS_LIST, accounts);
+
+    // Save tokens securely
+    await this.storeTokens(data.email, {
+      accessToken: data.accessToken,
+      refreshToken: data.refreshToken,
+      expiresAt: data.expiresAt
+    });
+
+    Logger.getInstance().info(`Account saved/updated: ${data.email}`);
+    return newAccount;
+  }
+
+  async removeAccount(email: string): Promise<void> {
+    const accounts = await this.getAllAccounts();
+    const filtered = accounts.filter(a => a.email !== email);
+    await this.context.globalState.update(STORAGE_KEYS.ACCOUNTS_LIST, filtered);
+
+    // Remove tokens securely
+    await this.context.secrets.delete(SECRET_KEYS.REFRESH_TOKEN(email));
+    await this.context.secrets.delete(SECRET_KEYS.ACCESS_TOKEN(email));
+    await this.context.secrets.delete(SECRET_KEYS.METADATA(email));
+    
+    Logger.getInstance().info(`Account removed: ${email}`);
+  }
+
+  async updateAccount(email: string, updates: Partial<Account>): Promise<void> {
+    const accounts = await this.getAllAccounts();
+    const index = accounts.findIndex(a => a.email === email);
+    
+    if (index >= 0) {
+      accounts[index] = { ...accounts[index], ...updates };
+      await this.context.globalState.update(STORAGE_KEYS.ACCOUNTS_LIST, accounts);
+    }
+  }
+
+  async getActiveAccountEmail(): Promise<string | null> {
+    return this.context.globalState.get<string | null>(STORAGE_KEYS.ACTIVE_ACCOUNT, null);
+  }
+
+  async setActiveAccount(email: string | null): Promise<void> {
+    const accounts = await this.getAllAccounts();
+    
+    // Deactivate all, activate the target
+    const updatedAccounts = accounts.map(a => ({
+      ...a,
+      isActive: email !== null && a.email.toLowerCase() === email.toLowerCase()
+    }));
+
+    await this.context.globalState.update(STORAGE_KEYS.ACCOUNTS_LIST, updatedAccounts);
+    await this.context.globalState.update(STORAGE_KEYS.ACTIVE_ACCOUNT, email || undefined);
+    
+    Logger.getInstance().info(`Active account set to: ${email}`);
+  }
+
+  async setActiveAccountEmail(email: string | null): Promise<void> {
+    return this.setActiveAccount(email);
+  }
+
+  async storeTokens(email: string, tokens: AccountTokens): Promise<void> {
+    await this.context.secrets.store(SECRET_KEYS.REFRESH_TOKEN(email), tokens.refreshToken);
+    await this.context.secrets.store(SECRET_KEYS.ACCESS_TOKEN(email), tokens.accessToken);
+    // Expiration metadata
+    await this.context.secrets.store(SECRET_KEYS.METADATA(email), JSON.stringify({ expiresAt: tokens.expiresAt }));
+  }
+
+  async getTokens(email: string): Promise<AccountTokens | null> {
+    try {
+      const refreshToken = await this.context.secrets.get(SECRET_KEYS.REFRESH_TOKEN(email));
+      const accessToken = await this.context.secrets.get(SECRET_KEYS.ACCESS_TOKEN(email));
+      const metaStr = await this.context.secrets.get(SECRET_KEYS.METADATA(email));
+      
+      if (!refreshToken || !accessToken) return null;
+      
+      const meta = metaStr ? JSON.parse(metaStr) : { expiresAt: 0 };
+      
+      return {
+        refreshToken,
+        accessToken,
+        expiresAt: meta.expiresAt
+      };
+    } catch (e) {
+      Logger.getInstance().error(`Failed to retrieve tokens for ${email}`, e);
+      return null;
+    }
+  }
+
+  async getAccountSummaries(): Promise<AccountSummary[]> {
+    const accounts = await this.getAllAccounts();
+    return accounts.map(a => ({
+      email: a.email,
+      displayName: a.alias || a.name || a.email,
+      alias: a.alias,
+      avatarUrl: a.avatarUrl,
+      balances: a.balances,
+      status: a.status,
+      isActive: a.isActive,
+      workflow: a.workflow,
+    }));
+  }
+
+  // ── Device Profile Storage (SecretStorage) ──────────────────────────────────
+
+  private deviceProfileKey(email: string): string {
+    return `antigravityAccount.secure.${email}.deviceProfile`;
+  }
+
+  async storeDeviceProfile(email: string, profile: DeviceProfile): Promise<void> {
+    await this.context.secrets.store(
+      this.deviceProfileKey(email),
+      JSON.stringify(profile)
+    );
+    // Mark account as having a device profile
+    await this.updateAccount(email, { hasDeviceProfile: true } as Partial<Account>);
+    Logger.getInstance().info(`Device profile stored securely for: ${email}`);
+  }
+
+  async getDeviceProfile(email: string): Promise<DeviceProfile | null> {
+    try {
+      const raw = await this.context.secrets.get(this.deviceProfileKey(email));
+      if (!raw) return null;
+      return JSON.parse(raw) as DeviceProfile;
+    } catch (e) {
+      Logger.getInstance().error(`Failed to retrieve device profile for ${email}`, e);
+      return null;
+    }
+  }
+
+  // ── Preferred Model Setting ─────────────────────────────────────────────────
+
+  async getPreferredModel(): Promise<string | null> {
+    return this.context.globalState.get<string | null>(STORAGE_KEYS.PREFERRED_MODEL, null);
+  }
+
+  async setPreferredModel(modelKey: string): Promise<void> {
+    await this.context.globalState.update(STORAGE_KEYS.PREFERRED_MODEL, modelKey);
+    Logger.getInstance().info(`Preferred model set to: ${modelKey || '(none)'}`);
+  }
+
+  // ── Global Balance Refresh Timestamp ────────────────────────────────────────
+
+  async getBalancesLastRefreshed(): Promise<number> {
+    return this.context.globalState.get<number>(STORAGE_KEYS.BALANCES_LAST_REFRESHED, 0);
+  }
+
+  async setBalancesLastRefreshed(timestampMs: number): Promise<void> {
+    await this.context.globalState.update(STORAGE_KEYS.BALANCES_LAST_REFRESHED, timestampMs);
+  }
+
+  // ── Pending Refresh Accounts (Resume on Relaunch) ───────────────────────────
+
+  async getPendingRefreshEmails(): Promise<string[]> {
+    return this.context.globalState.get<string[]>(STORAGE_KEYS.PENDING_REFRESH_EMAILS, []);
+  }
+
+  async setPendingRefreshEmails(emails: string[]): Promise<void> {
+    await this.context.globalState.update(STORAGE_KEYS.PENDING_REFRESH_EMAILS, emails);
+  }
+
+  // ── Workflow Management ───────────────────────────────────────────────────
+
+  async getWorkflows(): Promise<Workflow[]> {
+    return this.context.globalState.get<Workflow[]>(STORAGE_KEYS.WORKFLOWS, []);
+  }
+
+  async saveWorkflow(workflow: Workflow): Promise<void> {
+    const workflows = await this.getWorkflows();
+    const index = workflows.findIndex(w => w.id === workflow.id);
+    if (index >= 0) {
+      workflows[index] = { ...workflows[index], ...workflow };
+    } else {
+      workflows.push(workflow);
+    }
+    await this.context.globalState.update(STORAGE_KEYS.WORKFLOWS, workflows);
+    Logger.getInstance().info(`Workflow saved: ${workflow.name} (${workflow.id})`);
+  }
+
+  async deleteWorkflow(workflowId: string): Promise<void> {
+    const workflows = await this.getWorkflows();
+    const filtered = workflows.filter(w => w.id !== workflowId);
+    await this.context.globalState.update(STORAGE_KEYS.WORKFLOWS, filtered);
+
+    // Unassign accounts that belonged to this workflow (do not delete the accounts!)
+    const accounts = await this.getAllAccounts();
+    let accountsUpdated = false;
+    for (const acc of accounts) {
+      if (acc.workflow === workflowId) {
+        acc.workflow = undefined;
+        accountsUpdated = true;
+      }
+    }
+    if (accountsUpdated) {
+      await this.context.globalState.update(STORAGE_KEYS.ACCOUNTS_LIST, accounts);
+    }
+
+    // Reset active workflow if it was the deleted one
+    const activeWf = await this.getActiveWorkflowId();
+    if (activeWf === workflowId) {
+      await this.setActiveWorkflowId(null);
+    }
+
+    Logger.getInstance().info(`Workflow deleted: ${workflowId}`);
+  }
+
+  async renameWorkflow(workflowId: string, newName: string): Promise<void> {
+    const workflows = await this.getWorkflows();
+    const target = workflows.find(w => w.id === workflowId);
+    if (target) {
+      target.name = newName.trim();
+      await this.context.globalState.update(STORAGE_KEYS.WORKFLOWS, workflows);
+      Logger.getInstance().info(`Workflow ${workflowId} renamed to: ${newName}`);
+    }
+  }
+
+  async getActiveWorkflowId(): Promise<string | null> {
+    return this.context.globalState.get<string | null>(STORAGE_KEYS.ACTIVE_WORKFLOW, null);
+  }
+
+  async setActiveWorkflowId(workflowId: string | null): Promise<void> {
+    await this.context.globalState.update(STORAGE_KEYS.ACTIVE_WORKFLOW, workflowId);
+    Logger.getInstance().info(`Active workflow set to: ${workflowId || '(all)'}`);
+  }
+
+  async assignAccountsToWorkflow(emails: string[], workflowId?: string): Promise<void> {
+    const emailSet = new Set(emails.map(e => e.toLowerCase().trim()));
+    const accounts = await this.getAllAccounts();
+    let updated = false;
+
+    for (const acc of accounts) {
+      if (emailSet.has(acc.email.toLowerCase().trim())) {
+        if (workflowId) {
+          acc.workflow = workflowId;
+        } else {
+          delete acc.workflow;
+        }
+        updated = true;
+      }
+    }
+
+    if (updated) {
+      await this.context.globalState.update(STORAGE_KEYS.ACCOUNTS_LIST, accounts);
+      Logger.getInstance().info(`Assigned ${emails.length} accounts to workflow: ${workflowId || '(none)'}`);
+    }
+  }
+}
+

@@ -1,8 +1,8 @@
 {
   "name": "badhesh-quota-tracker",
-  "displayName": "Badhesh AI Quota Tracker",
-  "description": "Custom real-time AI model quota monitor and autopilot for Google Antigravity IDE.",
-  "version": "1.0.9",
+  "displayName": "Badhesh AI Quota Tracker & Account Switcher",
+  "description": "Real-time AI model quota monitor, multi-account manager & switcher, and hands-free autopilot for Google Antigravity IDE.",
+  "version": "1.1.0",
   "publisher": "badheshchauhan",
   "author": "Badhesh Chauhan",
   "license": "MIT",
@@ -24,7 +24,8 @@
   "categories": [
     "Other",
     "Visualization",
-    "AI"
+    "AI",
+    "Productivity"
   ],
   "keywords": [
     "antigravity",
@@ -37,9 +38,17 @@
     "autopilot",
     "auto-accept",
     "status bar",
-    "tracker"
+    "tracker",
+    "account-manager",
+    "account-switcher",
+    "multi-account"
   ],
   "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:badheshLimitMonitorView",
+    "onView:antigravity-account.accountsView"
+  ],
   "contributes": {
     "commands": [
       {
@@ -118,6 +127,90 @@
         "command": "antigravityLimitMonitor.relaunchWithPort",
         "title": "Enable Port 9333 & Restart Antigravity (1-Click CDP Autopilot)",
         "category": "Antigravity"
+      },
+      {
+        "command": "antigravity-account.openPanel",
+        "title": "Open Account Manager",
+        "category": "Antigravity Account",
+        "icon": "$(account)"
+      },
+      {
+        "command": "antigravity-account.addAccount",
+        "title": "Add Account",
+        "category": "Antigravity Account",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "antigravity-account.switchAccount",
+        "title": "Switch Account",
+        "category": "Antigravity Account",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "antigravity-account.refreshBalances",
+        "title": "Refresh All Balances",
+        "category": "Antigravity Account",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "antigravity-account.setLanguage",
+        "title": "Set Language",
+        "category": "Antigravity Account"
+      },
+      {
+        "command": "antigravity-account.getAccounts",
+        "title": "Get All Accounts (API)",
+        "category": "Antigravity Account"
+      },
+      {
+        "command": "antigravity-account.getActiveAccount",
+        "title": "Get Active Account (API)",
+        "category": "Antigravity Account"
+      },
+      {
+        "command": "antigravity-account.autoSwitch",
+        "title": "Auto-Switch to Best Quota Account",
+        "category": "Antigravity Account"
+      },
+      {
+        "command": "antigravity-account.refreshActiveQuota",
+        "title": "Refresh Active Account Quota",
+        "category": "Antigravity Account"
+      },
+      {
+        "command": "antigravity-account.toggleAutoSwitch",
+        "title": "Toggle Auto-Switch on Depletion",
+        "category": "Antigravity Account"
+      },
+      {
+        "command": "antigravity-account.syncActiveAccount",
+        "title": "Sync Native Antigravity Account",
+        "category": "Antigravity Account"
+      },
+      {
+        "command": "antigravity-account.toggleAutoCapture",
+        "title": "Toggle Auto-Capture of Native Logins",
+        "category": "Antigravity Account"
+      },
+      {
+        "command": "antigravity-account.toggleAutoResume",
+        "title": "Toggle Chat Auto-Resume on Depletion",
+        "category": "Antigravity Account"
+      },
+      {
+        "command": "antigravity-account.reconcileAccounts",
+        "title": "Reconcile Orphaned Accounts",
+        "category": "Antigravity Account"
+      },
+      {
+        "command": "antigravity-account.getConfig",
+        "title": "Get Configuration (API)",
+        "category": "Antigravity Account"
+      },
+      {
+        "command": "antigravity-account.updateConfig",
+        "title": "Update Configuration (API)",
+        "category": "Antigravity Account"
       }
     ],
     "viewsContainers": {
@@ -135,6 +228,12 @@
           "id": "badheshLimitMonitorView",
           "name": "Usage Limits",
           "icon": "assets/activity-icon.svg"
+        },
+        {
+          "type": "webview",
+          "id": "antigravity-account.accountsView",
+          "name": "Accounts Manager",
+          "icon": "resources/icons/sidebar-icon.svg"
         }
       ]
     },
@@ -149,91 +248,304 @@
           "command": "antigravityLimitMonitor.showDashboard",
           "when": "view == badheshLimitMonitorView",
           "group": "navigation@2"
+        },
+        {
+          "command": "antigravity-account.addAccount",
+          "when": "view == antigravity-account.accountsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "antigravity-account.refreshBalances",
+          "when": "view == antigravity-account.accountsView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "antigravity-account.switchAccount",
+          "when": "view == antigravity-account.accountsView",
+          "group": "navigation@3"
         }
       ]
     },
-    "configuration": {
-      "title": "Antigravity Model Limit Monitor",
-      "properties": {
-        "antigravityLimitMonitor.refreshIntervalSeconds": {
-          "type": "integer",
-          "default": 10,
-          "minimum": 3,
-          "maximum": 600,
-          "description": "Interval in seconds to refresh model quota limits from Language Server."
-        },
-        "antigravityLimitMonitor.statusBarFormat": {
-          "type": "string",
-          "enum": [
-            "all",
-            "geminiOnly",
-            "fiveHourOnly",
-            "compact",
-            "smartLowest"
-          ],
-          "enumDescriptions": [
-            "Show both Gemini & Claude 5h limits (e.g. Gemi: 57% | Cl: 100%)",
-            "Show Gemini limits only (e.g. Gemi: 57% (5h) 69% (W))",
-            "Show only 5-hour limits for active models",
-            "Compact icon with lowest percentage",
-            "Smart mode: automatically highlights the group with the lowest remaining quota"
-          ],
-          "default": "all",
-          "description": "Display format for the status bar item."
-        },
-        "antigravityLimitMonitor.showStatusAlertColors": {
-          "type": "boolean",
-          "default": true,
-          "description": "Highlight status bar text with warning/error colors when quota falls low."
-        },
-        "antigravityLimitMonitor.lowQuotaWarningThreshold": {
-          "type": "number",
-          "default": 20,
-          "minimum": 1,
-          "maximum": 50,
-          "description": "Show warning notification when any model limit drops below this percentage (0 to disable)."
-        },
-        "antigravityLimitMonitor.autoAccept.pollIntervalMs": {
-          "type": "integer",
-          "default": 800,
-          "minimum": 300,
-          "maximum": 5000,
-          "description": "Polling frequency in milliseconds for auto-accepting steps and terminal commands."
-        },
-        "antigravityLimitMonitor.autoAccept.choice": {
-          "type": "integer",
-          "enum": [
-            1,
-            2,
-            3
-          ],
-          "enumDescriptions": [
-            "Option 1: Standard Auto (Native Engine / Allow this time)",
-            "Option 2: Allow in this conversation (Yes, in this conversation)",
-            "Option 3: Always allow (Yes, and always allow)"
-          ],
-          "default": 1,
-          "description": "Default permission option preference when auto-accepting prompts."
-        },
-        "antigravityLimitMonitor.autoAccept.enableCdpMode": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically detect and attach to CDP port 9333 for permission and retry prompts."
-        },
-        "antigravityLimitMonitor.autoAccept.cdpPort": {
-          "type": "integer",
-          "default": 9333,
-          "description": "Remote debugging port for CDP connection."
+    "keybindings": [
+      {
+        "command": "antigravity-account.openPanel",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a"
+      },
+      {
+        "command": "antigravity-account.switchAccount",
+        "key": "ctrl+shift+s",
+        "mac": "cmd+shift+s"
+      },
+      {
+        "command": "antigravity-account.addAccount",
+        "key": "ctrl+shift+n",
+        "mac": "cmd+shift+n"
+      },
+      {
+        "command": "antigravity-account.refreshBalances",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r"
+      }
+    ],
+    "configuration": [
+      {
+        "title": "Antigravity Model Limit Monitor",
+        "properties": {
+          "antigravityLimitMonitor.refreshIntervalSeconds": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 3,
+            "maximum": 600,
+            "description": "Interval in seconds to refresh model quota limits from Language Server."
+          },
+          "antigravityLimitMonitor.statusBarFormat": {
+            "type": "string",
+            "enum": [
+              "all",
+              "geminiOnly",
+              "fiveHourOnly",
+              "compact",
+              "smartLowest"
+            ],
+            "enumDescriptions": [
+              "Show both Gemini & Claude 5h limits (e.g. Gemi: 57% | Cl: 100%)",
+              "Show Gemini limits only (e.g. Gemi: 57% (5h) 69% (W))",
+              "Show only 5-hour limits for active models",
+              "Compact icon with lowest percentage",
+              "Smart mode: automatically highlights the group with the lowest remaining quota"
+            ],
+            "default": "all",
+            "description": "Display format for the status bar item."
+          },
+          "antigravityLimitMonitor.showStatusAlertColors": {
+            "type": "boolean",
+            "default": true,
+            "description": "Highlight status bar text with warning/error colors when quota falls low."
+          },
+          "antigravityLimitMonitor.lowQuotaWarningThreshold": {
+            "type": "number",
+            "default": 20,
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Show warning notification when any model limit drops below this percentage (0 to disable)."
+          },
+          "antigravityLimitMonitor.autoAccept.pollIntervalMs": {
+            "type": "integer",
+            "default": 800,
+            "minimum": 300,
+            "maximum": 5000,
+            "description": "Polling frequency in milliseconds for auto-accepting steps and terminal commands."
+          },
+          "antigravityLimitMonitor.autoAccept.choice": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              3
+            ],
+            "enumDescriptions": [
+              "Option 1: Standard Auto (Native Engine / Allow this time)",
+              "Option 2: Allow in this conversation (Yes, in this conversation)",
+              "Option 3: Always allow (Yes, and always allow)"
+            ],
+            "default": 1,
+            "description": "Default permission option preference when auto-accepting prompts."
+          },
+          "antigravityLimitMonitor.autoAccept.enableCdpMode": {
+            "type": "boolean",
+            "default": true,
+            "description": "Automatically detect and attach to CDP port 9333 for permission and retry prompts."
+          },
+          "antigravityLimitMonitor.autoAccept.cdpPort": {
+            "type": "integer",
+            "default": 9333,
+            "description": "Remote debugging port for CDP connection."
+          }
+        }
+      },
+      {
+        "title": "Antigravity Account Manager",
+        "properties": {
+          "antigravityAccount.theme": {
+            "type": "string",
+            "default": "dark-purple",
+            "enum": [
+              "dark-purple",
+              "vscode",
+              "midnight",
+              "deep-blue"
+            ],
+            "enumDescriptions": [
+              "Dark Purple (Original Theme)",
+              "VS Code Theme (Adaptive to Editor)",
+              "Midnight Black (Pure OLED Dark)",
+              "Deep Ocean Blue"
+            ],
+            "description": "Visual theme for the accounts manager panel"
+          },
+          "antigravityAccount.language": {
+            "type": "string",
+            "default": "auto",
+            "enum": [
+              "auto",
+              "en",
+              "es",
+              "zh-CN",
+              "pt-BR",
+              "fr",
+              "de",
+              "ja",
+              "ru",
+              "ko",
+              "ar"
+            ],
+            "enumDescriptions": [
+              "Auto (Detect from Editor)",
+              "English",
+              "Español",
+              "中文 (简体)",
+              "Português (Brasil)",
+              "Français",
+              "Deutsch",
+              "日本語",
+              "Русский",
+              "한국어",
+              "العربية"
+            ],
+            "description": "Display language for the extension UI"
+          },
+          "antigravityAccount.autoRefreshEnabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable automatic balance refresh when opening the extension panel"
+          },
+          "antigravityAccount.refreshIntervalMinutes": {
+            "type": "number",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 1440,
+            "description": "Interval in minutes for automatic background balance refresh when auto-refresh is enabled (0 = Disabled)"
+          },
+          "antigravityAccount.activeQuotaRefreshIntervalSeconds": {
+            "type": "number",
+            "default": 45,
+            "minimum": 15,
+            "maximum": 600,
+            "description": "Polling interval in seconds for rapid quota monitoring of the active account"
+          },
+          "antigravityAccount.lowCreditThreshold": {
+            "type": "number",
+            "default": 100,
+            "minimum": 10,
+            "description": "Credit threshold for low balance warning"
+          },
+          "antigravityAccount.lowCreditNotificationsEnabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable native notifications when account credit balance falls below the threshold"
+          },
+          "antigravityAccount.autoRotateEnabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Automatically switch to another account when the active account's credits are depleted (Default: false)"
+          },
+          "antigravityAccount.confirmOnSwitch": {
+            "type": "boolean",
+            "default": false,
+            "description": "Show confirmation modal before closing and reloading window on account switch"
+          },
+          "antigravityAccount.noticeDurationSeconds": {
+            "type": "number",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 60,
+            "description": "Notice duration in seconds shown before switching accounts (0 = instantaneous)"
+          },
+          "antigravityAccount.autoCaptureAccounts": {
+            "type": "boolean",
+            "default": true,
+            "description": "Automatically detect and save accounts signed into Antigravity IDE without manual addition"
+          },
+          "antigravityAccount.showNotifications": {
+            "type": "boolean",
+            "default": false,
+            "description": "Show verbose/frequent notifications (e.g. accounts auto-detected, refresh queues)"
+          },
+          "antigravityAccount.autoResumeChat": {
+            "type": "boolean",
+            "default": false,
+            "description": "Automatically restore active chat session and continue AI generation after account switch on depletion"
+          },
+          "antigravityAccount.autoResumePrompt": {
+            "type": "string",
+            "default": "continua",
+            "description": "Prompt text automatically sent to the AI chat after account switch when previous generation stopped due to quota depletion"
+          },
+          "antigravityAccount.autoResumeTimeoutSeconds": {
+            "type": "number",
+            "default": 90,
+            "minimum": 10,
+            "maximum": 600,
+            "description": "Maximum seconds elapsed since the last assistant message to consider that the AI was actively working"
+          },
+          "antigravityAccount.adaptiveQuotaPolling": {
+            "type": "boolean",
+            "default": true,
+            "description": "Dynamically accelerates quota polling when active account quota drops below 10%"
+          },
+          "antigravityAccount.cacheDurationDays": {
+            "type": "number",
+            "default": 7,
+            "minimum": 1,
+            "maximum": 30,
+            "description": "Number of days that scanned account balances are cached before requiring a refresh"
+          },
+          "antigravityAccount.sortBy": {
+            "type": "string",
+            "default": "default",
+            "enum": [
+              "default",
+              "name-asc",
+              "name-desc",
+              "email-asc",
+              "email-desc",
+              "date-added",
+              "quota",
+              "quota-regen"
+            ],
+            "enumDescriptions": [
+              "Default (Preferred model / Status)",
+              "Name (A-Z)",
+              "Name (Z-A)",
+              "Email (A-Z)",
+              "Email (Z-A)",
+              "Date Added (Newest first)",
+              "Remaining Quota (Highest first)",
+              "Quota Regen Time (Soonest first)"
+            ],
+            "description": "Sorting order for accounts in the list"
+          },
+          "antigravityAccount.oauthClientId": {
+            "type": "string",
+            "default": "",
+            "description": "Custom Google OAuth Client ID to prevent 7-day token expiration. Leave empty to use the default client."
+          },
+          "antigravityAccount.oauthClientSecret": {
+            "type": "string",
+            "default": "",
+            "description": "Custom Google OAuth Client Secret (required if using custom Client ID)."
+          }
         }
       }
-    }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "build": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
-    "package": "vsce package --no-dependencies --baseContentUrl https://tools.badheshchauhan.com --baseImagesUrl https://tools.badheshchauhan.com"
+    "watch": "node scripts/build.js --watch",
+    "build": "node scripts/build.js",
+    "package": "vsce package --baseContentUrl https://tools.badheshchauhan.com --baseImagesUrl https://tools.badheshchauhan.com"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
@@ -241,5 +553,8 @@
     "@vscode/vsce": "^2.24.0",
     "esbuild": "^0.20.0",
     "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "sql.js": "^1.14.2"
   }
 }

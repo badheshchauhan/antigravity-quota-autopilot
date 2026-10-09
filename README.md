@@ -86,6 +86,26 @@ Keep an accurate record of your AI usage and understand where your quota is bein
 
 ---
 
+### 5. Multi-Account Switcher & Session Manager
+Connect multiple Google / Antigravity accounts and switch between active sessions in one click.
+
+- **1-Click Seamless Session Switching**: Switch active account sessions in 1 click without manually logging out or re-authenticating.
+- **Direct SQLite `state.vscdb` Token Injection**: Uses detached worker process and rolling SQLite backups to safely inject Protobuf tokens and randomized device profiles.
+- **Unified Sidebar UI**: Directly accessible from the same **Model Limits** Activity Bar panel alongside your Usage Limits and Dashboard.
+- **Intelligent Renewal-Aware Sorting**:
+  - Pinned active account at the top.
+  - Accounts with available quota (> 0%) ordered by highest remaining quota first.
+  - Depleted accounts (0%) ordered by **closest renewal countdown** (accounts recharging soonest appear first).
+- **Auto-Capture Native Logins**: Automatically detects and registers accounts already signed into Antigravity IDE.
+- **Multiple Theme Options**: Choose between **Dark Purple**, **VS Code Adaptive**, **Midnight Black (OLED Pure)**, or **Deep Ocean Blue**.
+- **Keyboard Shortcuts**:
+  - `Ctrl+Shift+A` / `Cmd+Shift+A`: Open Account Manager
+  - `Ctrl+Shift+S` / `Cmd+Shift+S`: Quick Switch Account
+  - `Ctrl+Shift+N` / `Cmd+Shift+N`: Add New Google Account
+  - `Ctrl+Shift+R` / `Cmd+Shift+R`: Refresh All Balances
+
+---
+
 ## Choosing Your Auto-Accept Mode
 
 | Feature | Standard Auto (Recommended) | CDP Autopilot (Advanced) |

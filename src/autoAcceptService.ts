@@ -353,20 +353,20 @@ export class AutoAcceptService extends EventEmitter implements vscode.Disposable
       const targetLabel = choice === 2 ? 'Option 2 (In conversation)' : 'Option 3 (Always allow)';
       vscode.window.showWarningMessage(
         `${targetLabel} requires Antigravity IDE to be launched with --remote-debugging-port=9333. Switched to Option 1 (Standard Auto) instead.`,
-        'Auto-Patch Shortcuts (Windows)',
+        'Auto-Patch Shortcuts',
         'Dismiss'
       ).then(async (action) => {
-        if (action === 'Auto-Patch Shortcuts (Windows)') {
+        if (action === 'Auto-Patch Shortcuts') {
           const config = vscode.workspace.getConfiguration('antigravityLimitMonitor');
           const port = config.get<number>('autoAccept.cdpPort', 9333);
-          const res = await this.patchWindowsShortcuts(port);
+          const res = await this.patchShortcuts(port);
           if (res.newlyPatched > 0) {
             vscode.window.showInformationMessage(
-              `Successfully patched ${res.newlyPatched} Antigravity shortcut(s) with port ${port}. Please close and reopen Antigravity from your Desktop shortcut to activate CDP Autopilot.`
+              `Successfully patched ${res.newlyPatched} Antigravity shortcut(s) with port ${port}. Please close and reopen Antigravity to activate CDP Autopilot.`
             );
           } else if (res.alreadyPatched > 0) {
             vscode.window.showInformationMessage(
-              `All ${res.alreadyPatched} Antigravity shortcut(s) already have port ${port}. Please close Antigravity completely and reopen it from your Desktop shortcut to activate Port ${port}.`
+              `All ${res.alreadyPatched} Antigravity shortcut(s) already have port ${port}. Please close Antigravity completely and reopen it to activate Port ${port}.`
             );
           }
         }
@@ -453,6 +453,55 @@ export class AutoAcceptService extends EventEmitter implements vscode.Disposable
     });
   }
 
+  public async patchShortcuts(targetPort: number = 9333): Promise<ShortcutPatchResult> {
+    if (process.platform === 'win32') {
+      return this.patchWindowsShortcuts(targetPort);
+    } else if (process.platform === 'linux') {
+      return this.patchLinuxShortcuts(targetPort);
+    }
+    return { newlyPatched: 0, alreadyPatched: 0, totalFound: 0 };
+  }
+
+  public async patchLinuxShortcuts(targetPort: number = 9333): Promise<ShortcutPatchResult> {
+    const res: ShortcutPatchResult = { newlyPatched: 0, alreadyPatched: 0, totalFound: 0 };
+    if (process.platform !== 'linux') return res;
+    const searchDirs = [
+      path.join(os.homedir(), '.local', 'share', 'applications'),
+      path.join(os.homedir(), 'Desktop')
+    ];
+    const flag = `--remote-debugging-port=${targetPort}`;
+
+    for (const dir of searchDirs) {
+      if (!fs.existsSync(dir)) continue;
+      try {
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+          if (!file.endsWith('.desktop')) continue;
+          if (!file.toLowerCase().includes('antigravity')) continue;
+          const fullPath = path.join(dir, file);
+          try {
+            const content = fs.readFileSync(fullPath, 'utf8');
+            if (content.includes(flag)) {
+              res.alreadyPatched++;
+              res.totalFound++;
+            } else {
+              const updated = content.replace(/^(Exec=[^\r\n]+)$/m, (line) => {
+                if (/\s+%[A-Za-z]\s*$/.test(line)) {
+                  return line.replace(/(\s+%[A-Za-z]\s*)$/, ` ${flag}$1`);
+                }
+                return `${line} ${flag}`;
+              });
+              fs.writeFileSync(fullPath, updated, 'utf8');
+              res.newlyPatched++;
+              res.totalFound++;
+            }
+          } catch (e) {}
+        }
+      } catch (e) {}
+    }
+    return res;
+  }
+
   public async patchWindowsShortcuts(targetPort: number = 9333): Promise<ShortcutPatchResult> {
     const emptyResult: ShortcutPatchResult = { newlyPatched: 0, alreadyPatched: 0, totalFound: 0 };
     if (process.platform !== 'win32') return emptyResult;
@@ -504,10 +553,26 @@ Write-Output "$newly,$already"
     });
   }
 
-
   public async findAntigravityExe(): Promise<string> {
-    if (process.execPath && !process.execPath.toLowerCase().endsWith('node.exe') && fs.existsSync(process.execPath)) {
+    if (
+      process.execPath &&
+      !process.execPath.toLowerCase().endsWith('node') &&
+      !process.execPath.toLowerCase().endsWith('node.exe') &&
+      fs.existsSync(process.execPath)
+    ) {
       return process.execPath;
+    }
+    if (process.platform === 'linux') {
+      const linuxCandidates = [
+        path.join(os.homedir(), '.local', 'bin', 'antigravity'),
+        '/usr/bin/antigravity',
+        '/usr/local/bin/antigravity',
+        '/opt/Antigravity/antigravity'
+      ];
+      for (const c of linuxCandidates) {
+        if (fs.existsSync(c)) return c;
+      }
+      return 'antigravity';
     }
     const candidates = [
       path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Antigravity IDE', 'Antigravity IDE.exe'),
@@ -524,37 +589,69 @@ Write-Output "$newly,$already"
   }
 
   public async relaunchWithDebugPort(targetPort: number = 9333): Promise<void> {
-    if (process.platform !== 'win32') return;
+    if (process.platform === 'win32') {
+      // 1. Patch shortcuts so all future launches keep port 9333
+      await this.patchWindowsShortcuts(targetPort);
 
-    // 1. Patch shortcuts so all future launches keep port 9333
-    await this.patchWindowsShortcuts(targetPort);
+      // 2. Locate the executable
+      const exePath = await this.findAntigravityExe();
 
-    // 2. Locate the executable
-    const exePath = await this.findAntigravityExe();
+      // 3. Resolve active workspace
+      let workspaceArg = '';
+      if (vscode.workspace.workspaceFile) {
+        workspaceArg = vscode.workspace.workspaceFile.fsPath;
+      } else if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+        workspaceArg = vscode.workspace.workspaceFolders[0].uri.fsPath;
+      }
 
-    // 3. Resolve active workspace
-    let workspaceArg = '';
-    if (vscode.workspace.workspaceFile) {
-      workspaceArg = vscode.workspace.workspaceFile.fsPath;
-    } else if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
-      workspaceArg = vscode.workspace.workspaceFolders[0].uri.fsPath;
+      // 4. Create an independent launcher .bat in temp directory
+      const batPath = path.join(os.tmpdir(), `antigravity_relaunch_${Date.now()}.bat`);
+      const targetArgs = workspaceArg ? `--remote-debugging-port=${targetPort} "${workspaceArg}"` : `--remote-debugging-port=${targetPort}`;
+      const batContent = `@echo off\r\ntimeout /t 2 /nobreak >nul\r\nstart "" "${exePath}" ${targetArgs}\r\ndel "%~f0"\r\n`;
+      fs.writeFileSync(batPath, batContent, 'utf8');
+
+      // 5. Spawn via WMI to break out of VS Code's Windows Job Object
+      const psCmd = `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = 'cmd.exe /c "${batPath}"' }`;
+      const b64 = Buffer.from(psCmd, 'utf16le').toString('base64');
+      try {
+        cp.execSync(`powershell.exe -NoProfile -NonInteractive -EncodedCommand ${b64}`, { windowsHide: true });
+      } catch (e) {}
+
+      // 6. Gracefully exit current IDE window
+      await vscode.commands.executeCommand('workbench.action.quit');
+    } else if (process.platform === 'linux') {
+      await this.patchLinuxShortcuts(targetPort);
+      const exePath = await this.findAntigravityExe();
+      const args = [`--remote-debugging-port=${targetPort}`];
+      if (vscode.workspace.workspaceFile) {
+        args.push(vscode.workspace.workspaceFile.fsPath);
+      } else if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+        args.push(vscode.workspace.workspaceFolders[0].uri.fsPath);
+      }
+      try {
+        const child = cp.spawn(exePath, args, {
+          detached: true,
+          stdio: 'ignore'
+        });
+        child.unref();
+      } catch (e) {}
+      await vscode.commands.executeCommand('workbench.action.quit');
+    } else if (process.platform === 'darwin') {
+      const args = ['-n', '-a', 'Antigravity', '--args', `--remote-debugging-port=${targetPort}`];
+      if (vscode.workspace.workspaceFile) {
+        args.push(vscode.workspace.workspaceFile.fsPath);
+      } else if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+        args.push(vscode.workspace.workspaceFolders[0].uri.fsPath);
+      }
+      try {
+        const child = cp.spawn('open', args, {
+          detached: true,
+          stdio: 'ignore'
+        });
+        child.unref();
+      } catch (e) {}
+      await vscode.commands.executeCommand('workbench.action.quit');
     }
-
-    // 4. Create an independent launcher .bat in temp directory
-    const batPath = path.join(os.tmpdir(), `antigravity_relaunch_${Date.now()}.bat`);
-    const targetArgs = workspaceArg ? `--remote-debugging-port=${targetPort} "${workspaceArg}"` : `--remote-debugging-port=${targetPort}`;
-    const batContent = `@echo off\r\ntimeout /t 2 /nobreak >nul\r\nstart "" "${exePath}" ${targetArgs}\r\ndel "%~f0"\r\n`;
-    fs.writeFileSync(batPath, batContent, 'utf8');
-
-    // 5. Spawn via WMI to break out of VS Code's Windows Job Object (which kills child processes on quit)
-    const psCmd = `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = 'cmd.exe /c "${batPath}"' }`;
-    const b64 = Buffer.from(psCmd, 'utf16le').toString('base64');
-    try {
-      cp.execSync(`powershell.exe -NoProfile -NonInteractive -EncodedCommand ${b64}`, { windowsHide: true });
-    } catch (e) {}
-
-    // 6. Gracefully exit current IDE window
-    await vscode.commands.executeCommand('workbench.action.quit');
   }
 
   public async verifyPortAndNotify(): Promise<void> {
@@ -566,13 +663,13 @@ Write-Output "$newly,$already"
     } else {
       const choice = await vscode.window.showWarningMessage(
         `$(zap) Auto-Accept is active for code edits, but Antigravity needs to be restarted with Debug Port ${port} to auto-click Run & Permission prompts.`,
-        'Auto-Patch Shortcuts (Windows)',
+        'Auto-Patch Shortcuts',
         'Dismiss'
       );
-      if (choice === 'Auto-Patch Shortcuts (Windows)') {
-        await this.patchWindowsShortcuts(port);
+      if (choice === 'Auto-Patch Shortcuts') {
+        await this.patchShortcuts(port);
         vscode.window.showInformationMessage(
-          `$(check) Antigravity shortcuts patched with port ${port}! Please restart Antigravity from your Desktop or Start Menu shortcut to activate full auto-run.`,
+          `$(check) Antigravity shortcuts patched with port ${port}! Please restart Antigravity to activate full auto-run.`,
           'Reload Window'
         ).then(action => {
           if (action === 'Reload Window') {

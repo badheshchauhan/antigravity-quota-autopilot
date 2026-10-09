@@ -1,21 +1,39 @@
 import * as vscode from 'vscode';
 import { QuotaService } from '../quotaService';
+import { AutoAcceptService } from '../autoAcceptService';
 import { ParsedQuotaInfo, QuotaBucket, QuotaGroup } from '../types';
+import { getAccountRepo, getAccountService } from '../accountsManager';
 
 export class QuotaTreeItem extends vscode.TreeItem {
   constructor(
     public readonly label: string,
     public readonly collapsibleState: vscode.TreeItemCollapsibleState,
-    public readonly itemType: 'group' | 'bucket' | 'info' | 'error',
+    public readonly itemType: 'action' | 'group' | 'bucket' | 'info' | 'error',
     public readonly group?: QuotaGroup,
     public readonly bucket?: QuotaBucket,
-    public readonly infoText?: string
+    public readonly infoText?: string,
+    public readonly customCommand?: vscode.Command,
+    public readonly customIcon?: { icon: string; color?: string }
   ) {
     super(label, collapsibleState);
 
-    if (itemType === 'group' && group) {
+    if (customCommand) {
+      this.command = customCommand;
+    }
+
+    if (itemType === 'action') {
+      this.contextValue = 'quotaAction';
+      this.description = infoText;
+      if (customIcon) {
+        this.iconPath = new vscode.ThemeIcon(
+          customIcon.icon,
+          customIcon.color ? new vscode.ThemeColor(customIcon.color) : undefined
+        );
+      }
+    } else if (itemType === 'group' && group) {
       this.contextValue = 'quotaGroup';
-      this.iconPath = group.displayName.toLowerCase().includes('gemini')
+      const isGemini = group.displayName.toLowerCase().includes('gemini');
+      this.iconPath = isGemini
         ? new vscode.ThemeIcon('sparkle', new vscode.ThemeColor('charts.blue'))
         : new vscode.ThemeIcon('hubot', new vscode.ThemeColor('charts.purple'));
       this.description = `${group.buckets.length} limits`;
@@ -33,14 +51,13 @@ export class QuotaTreeItem extends vscode.TreeItem {
         );
       } else {
         const pct = QuotaService.formatPercentage(bucket.remainingFraction);
-        
         const totalBlocks = 8;
         const filledBlocks = Math.round(bucket.remainingFraction * totalBlocks);
         const emptyBlocks = totalBlocks - filledBlocks;
         const bar = '█'.repeat(filledBlocks) + '░'.repeat(emptyBlocks);
-        
-        let extraDesc = bucket.window === 'weekly' ? '(W)' : '(D)';
-        
+
+        const extraDesc = bucket.window === 'weekly' ? '(Weekly)' : '(5h)';
+
         if (bucket.resetTime) {
           const timeUntil = QuotaService.formatTimeUntilReset(bucket.resetTime);
           this.description = `${bar} ${pct} ${extraDesc} ↻ ${timeUntil}`;
@@ -48,19 +65,20 @@ export class QuotaTreeItem extends vscode.TreeItem {
           this.description = `${bar} ${pct} ${extraDesc}`;
         }
 
-        // Icon based on percentage
+        // Color coded status icon
         if (bucket.remainingFraction >= 0.50) {
           this.iconPath = new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('charts.green'));
         } else if (bucket.remainingFraction >= 0.20) {
-          this.iconPath = new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('charts.blue'));
+          this.iconPath = new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('charts.yellow'));
         } else {
           this.iconPath = new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('charts.red'));
         }
 
         this.tooltip = new vscode.MarkdownString(
-          `**${bucket.displayName}**\n\n` +
-          `- Remaining: **${pct}**\n` +
-          (bucket.resetTime ? `- Resets in: **${QuotaService.formatTimeUntilReset(bucket.resetTime)}**\n` : '') +
+          `### ${bucket.displayName}\n\n` +
+          `- **Remaining:** ${pct} (${bucket.remainingFraction * 100}%)\n` +
+          `- **Window:** ${extraDesc}\n` +
+          (bucket.resetTime ? `- **Resets in:** ${QuotaService.formatTimeUntilReset(bucket.resetTime)}\n` : '') +
           (bucket.description ? `\n_${bucket.description}_` : '')
         );
       }
@@ -88,19 +106,32 @@ export class QuotaTreeDataProvider implements vscode.TreeDataProvider<QuotaTreeI
     this._onDidChangeTreeData.event;
 
   private quotaService: QuotaService;
+  private autoAcceptService?: AutoAcceptService;
   private lastError: Error | null = null;
 
-  constructor(quotaService: QuotaService) {
+  constructor(quotaService: QuotaService, autoAcceptService?: AutoAcceptService) {
     this.quotaService = quotaService;
+    this.autoAcceptService = autoAcceptService;
 
     this.quotaService.on('quotaUpdated', () => {
       this.lastError = null;
       this._onDidChangeTreeData.fire();
     });
+
     this.quotaService.on('error', (err: Error) => {
       this.lastError = err;
       this._onDidChangeTreeData.fire();
     });
+
+    if (this.autoAcceptService) {
+      this.autoAcceptService.on('statusChanged', () => this.refresh());
+      this.autoAcceptService.on('choiceChanged', () => this.refresh());
+    }
+
+    const accountService = getAccountService();
+    if (accountService) {
+      accountService.onAccountsChanged(() => this.refresh());
+    }
   }
 
   refresh(): void {
@@ -114,35 +145,161 @@ export class QuotaTreeDataProvider implements vscode.TreeDataProvider<QuotaTreeI
   async getChildren(element?: QuotaTreeItem): Promise<QuotaTreeItem[]> {
     const quota = this.quotaService.getLastQuotaInfo();
 
-    if (!quota) {
-      if (this.lastError) {
-        return [
-          new QuotaTreeItem(
-            'Language Server Offline',
-            vscode.TreeItemCollapsibleState.None,
-            'error',
-            undefined,
-            undefined,
-            'Click to retry'
-          ),
-        ];
+    if (!element) {
+      const items: QuotaTreeItem[] = [];
+
+      // Account repository info
+      const accountRepo = getAccountRepo();
+      let accountsCount = 0;
+      let activeEmail = quota?.userEmail || null;
+      if (accountRepo) {
+        try {
+          const accounts = await accountRepo.getAllAccounts();
+          accountsCount = accounts.length;
+          const dbEmail = await accountRepo.getActiveAccountEmail();
+          if (dbEmail) activeEmail = dbEmail;
+        } catch (e) {}
       }
 
-      return [
-        new QuotaTreeItem(
-          'Connecting to Language Server...',
-          vscode.TreeItemCollapsibleState.None,
-          'info',
-          undefined,
-          undefined,
-          'Please wait'
-        ),
-      ];
-    }
+      // ── Active Account Item (Top of sidebar) ──
+      if (activeEmail) {
+        items.push(
+          new QuotaTreeItem(
+            `Account: ${activeEmail}`,
+            vscode.TreeItemCollapsibleState.None,
+            'action',
+            undefined,
+            undefined,
+            quota?.planName ? quota.planName.toUpperCase() : 'Active',
+            {
+              command: 'antigravity-account.switchAccount',
+              title: 'Switch Account'
+            },
+            { icon: 'account', color: 'charts.green' }
+          )
+        );
+      }
 
-    if (!element) {
-      // Root level: return groups + last updated
-      const items: QuotaTreeItem[] = [];
+      // ── Quick Controls & Navigation ──
+      items.push(
+        new QuotaTreeItem(
+          'Open AI Limits Dashboard',
+          vscode.TreeItemCollapsibleState.None,
+          'action',
+          undefined,
+          undefined,
+          'Gauges & Accounts',
+          {
+            command: 'antigravityLimitMonitor.showDashboard',
+            title: 'Show Dashboard'
+          },
+          { icon: 'dashboard', color: 'textLink.foreground' }
+        )
+      );
+
+      // Auto-Accept toggle status
+      if (this.autoAcceptService) {
+        const isAuto = this.autoAcceptService.getStatus();
+        const choice = this.autoAcceptService.getChoice();
+        const autoLabel = isAuto ? 'Auto-Accept: Active' : 'Auto-Accept: Paused';
+        const autoDesc = isAuto ? `Option ${choice}` : 'Click to Enable';
+        items.push(
+          new QuotaTreeItem(
+            autoLabel,
+            vscode.TreeItemCollapsibleState.None,
+            'action',
+            undefined,
+            undefined,
+            autoDesc,
+            {
+              command: 'antigravityLimitMonitor.toggleAutoAccept',
+              title: 'Toggle Auto-Accept'
+            },
+            {
+              icon: isAuto ? 'zap' : 'circle-slash',
+              color: isAuto ? 'charts.green' : 'disabledForeground'
+            }
+          )
+        );
+      }
+
+      // Quick Switch Account
+      items.push(
+        new QuotaTreeItem(
+          'Switch Active Account',
+          vscode.TreeItemCollapsibleState.None,
+          'action',
+          undefined,
+          undefined,
+          accountsCount > 0 ? `${accountsCount} Available` : '1-Click Switch',
+          {
+            command: 'antigravity-account.switchAccount',
+            title: 'Switch Account'
+          },
+          { icon: 'arrow-swap', color: 'charts.blue' }
+        )
+      );
+
+      // Add Account
+      items.push(
+        new QuotaTreeItem(
+          'Add Google Account',
+          vscode.TreeItemCollapsibleState.None,
+          'action',
+          undefined,
+          undefined,
+          'Connect session',
+          {
+            command: 'antigravity-account.addAccount',
+            title: 'Add Account'
+          },
+          { icon: 'plus', color: 'charts.green' }
+        )
+      );
+
+      // Refresh limits
+      items.push(
+        new QuotaTreeItem(
+          'Refresh Limits Now',
+          vscode.TreeItemCollapsibleState.None,
+          'action',
+          undefined,
+          undefined,
+          'Language Server',
+          {
+            command: 'antigravityLimitMonitor.refresh',
+            title: 'Refresh Limits'
+          },
+          { icon: 'refresh', color: 'charts.purple' }
+        )
+      );
+
+      if (!quota) {
+        if (this.lastError) {
+          items.push(
+            new QuotaTreeItem(
+              'Language Server Offline',
+              vscode.TreeItemCollapsibleState.None,
+              'error',
+              undefined,
+              undefined,
+              'Click to retry'
+            )
+          );
+        } else {
+          items.push(
+            new QuotaTreeItem(
+              'Connecting to Language Server...',
+              vscode.TreeItemCollapsibleState.None,
+              'info',
+              undefined,
+              undefined,
+              'Please wait'
+            )
+          );
+        }
+        return items;
+      }
 
       if (this.lastError) {
         items.push(
@@ -157,6 +314,7 @@ export class QuotaTreeDataProvider implements vscode.TreeDataProvider<QuotaTreeI
         );
       }
 
+      // Model Quota Groups
       for (const group of quota.groups) {
         items.push(
           new QuotaTreeItem(
@@ -164,6 +322,20 @@ export class QuotaTreeDataProvider implements vscode.TreeDataProvider<QuotaTreeI
             vscode.TreeItemCollapsibleState.Expanded,
             'group',
             group
+          )
+        );
+      }
+
+      // Metadata info
+      if (quota.userEmail) {
+        items.push(
+          new QuotaTreeItem(
+            'Account',
+            vscode.TreeItemCollapsibleState.None,
+            'info',
+            undefined,
+            undefined,
+            `${quota.userEmail}${quota.planName ? ' (' + quota.planName + ')' : ''}`
           )
         );
       }
@@ -178,19 +350,6 @@ export class QuotaTreeDataProvider implements vscode.TreeDataProvider<QuotaTreeI
           quota.lastUpdated.toLocaleTimeString()
         )
       );
-
-      if (quota.userEmail) {
-        items.push(
-          new QuotaTreeItem(
-            'Account',
-            vscode.TreeItemCollapsibleState.None,
-            'info',
-            undefined,
-            undefined,
-            `${quota.userEmail}${quota.planName ? ' (' + quota.planName + ')' : ''}`
-          )
-        );
-      }
 
       return items;
     }
@@ -211,4 +370,3 @@ export class QuotaTreeDataProvider implements vscode.TreeDataProvider<QuotaTreeI
     return [];
   }
 }
-

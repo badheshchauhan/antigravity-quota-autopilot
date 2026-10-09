@@ -6,6 +6,8 @@ import { StatusBarManager } from './views/statusBar';
 import { QuotaTreeDataProvider } from './views/sidebarProvider';
 import { DashboardWebviewPanel } from './views/dashboardWebview';
 import { ParsedQuotaInfo, AutoAcceptChoice } from './types';
+import { activateAccounts, deactivateAccounts } from './accountsManager';
+export * from './api/extension-api';
 
 let quotaService: QuotaService;
 let taskSessionService: TaskSessionService;
@@ -14,12 +16,19 @@ let statusBarManager: StatusBarManager;
 let treeDataProvider: QuotaTreeDataProvider;
 let hasAlertedForLowQuota = false;
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
+  // ── Initialize Antigravity Accounts Manager ──
+  try {
+    await activateAccounts(context);
+  } catch (err) {
+    console.error('Failed to activate Antigravity Account Manager:', err);
+  }
+
   quotaService = QuotaService.getInstance();
   taskSessionService = TaskSessionService.getInstance(context.globalState, quotaService);
   autoAcceptService = AutoAcceptService.getInstance(context.globalState);
   statusBarManager = new StatusBarManager(quotaService, taskSessionService, autoAcceptService);
-  treeDataProvider = new QuotaTreeDataProvider(quotaService);
+  treeDataProvider = new QuotaTreeDataProvider(quotaService, autoAcceptService);
 
   // Register Tree View in Activity Bar
   try {
@@ -134,20 +143,20 @@ export function activate(context: vscode.ExtensionContext) {
         if (selected.disabled) {
           vscode.window.showWarningMessage(
             `Option ${selected.choice} requires Antigravity IDE to be launched with --remote-debugging-port=9333. You can continue using Standard Auto without any port.`,
-            'Auto-Patch Shortcuts (Windows)',
+            'Auto-Patch Shortcuts',
             'Dismiss'
           ).then(async (action) => {
-            if (action === 'Auto-Patch Shortcuts (Windows)') {
+            if (action === 'Auto-Patch Shortcuts') {
               const config = vscode.workspace.getConfiguration('antigravityLimitMonitor');
               const port = config.get<number>('autoAccept.cdpPort', 9333);
-              const res = await autoAcceptService.patchWindowsShortcuts(port);
+              const res = await autoAcceptService.patchShortcuts(port);
               if (res.newlyPatched > 0) {
                 vscode.window.showInformationMessage(
-                  `Antigravity shortcuts patched with port ${port}. Please close and reopen Antigravity from your Desktop shortcut to activate CDP Autopilot.`
+                  `Antigravity shortcuts patched with port ${port}. Please close and reopen Antigravity to activate CDP Autopilot.`
                 );
               } else if (res.alreadyPatched > 0) {
                 vscode.window.showInformationMessage(
-                  `All ${res.alreadyPatched} Antigravity shortcuts already have port ${port}. Please close Antigravity completely and reopen it from your Desktop shortcut to activate Port ${port}.`
+                  `All ${res.alreadyPatched} Antigravity shortcuts already have port ${port}. Please close Antigravity completely and reopen it to activate Port ${port}.`
                 );
               }
             }
@@ -199,18 +208,18 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('antigravityLimitMonitor.patchShortcuts', async () => {
       const config = vscode.workspace.getConfiguration('antigravityLimitMonitor');
       const port = config.get<number>('autoAccept.cdpPort', 9333);
-      const res = await autoAcceptService.patchWindowsShortcuts(port);
+      const res = await autoAcceptService.patchShortcuts(port);
       if (res.newlyPatched > 0) {
         vscode.window.showInformationMessage(
-          `Successfully patched ${res.newlyPatched} Antigravity shortcut(s) with --remote-debugging-port=${port}. Please close and reopen Antigravity from your Desktop shortcut to activate CDP Autopilot.`
+          `Successfully patched ${res.newlyPatched} Antigravity shortcut(s) with --remote-debugging-port=${port}. Please close and reopen Antigravity to activate CDP Autopilot.`
         );
       } else if (res.alreadyPatched > 0) {
         vscode.window.showInformationMessage(
-          `All ${res.alreadyPatched} Antigravity shortcut(s) on Desktop and Start Menu already have --remote-debugging-port=${port}. Please close Antigravity completely and reopen it from your Desktop shortcut to activate Port ${port}.`
+          `All ${res.alreadyPatched} Antigravity shortcut(s) already have --remote-debugging-port=${port}. Please close Antigravity completely and reopen it to activate Port ${port}.`
         );
       } else {
         vscode.window.showWarningMessage(
-          `Could not find Antigravity shortcuts on Desktop or Start Menu. Please launch Antigravity with: "Antigravity IDE.exe" --remote-debugging-port=${port}`
+          `Could not automatically locate Antigravity application shortcuts. Please launch Antigravity with: antigravity --remote-debugging-port=${port}`
         );
       }
     }),
@@ -362,6 +371,11 @@ export function activate(context: vscode.ExtensionContext) {
           description: 'Clear up to 1,000 saved AI activity records',
           action: 'clearHistory',
         },
+        {
+          label: '$(account) Switch / Manage Antigravity Accounts...',
+          description: '1-Click switch active account, multi-account quotas & countdowns',
+          action: 'switchAccount',
+        },
       ];
 
       const selected = await vscode.window.showQuickPick(items, {
@@ -388,6 +402,9 @@ export function activate(context: vscode.ExtensionContext) {
           break;
         case 'clearHistory':
           vscode.commands.executeCommand('antigravityLimitMonitor.clearHistory');
+          break;
+        case 'switchAccount':
+          vscode.commands.executeCommand('antigravity-account.switchAccount');
           break;
       }
     })
@@ -510,6 +527,8 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
+  deactivateAccounts();
+
   if (autoAcceptService) {
     autoAcceptService.dispose();
   }
