@@ -74,28 +74,73 @@ export class StatusBarProvider implements vscode.Disposable {
       md.appendMarkdown(`- **Plan:** \`${activeAccount.plan.toUpperCase()}\`\n`);
     }
 
-    // Summarize Gemini vs Claude limits if cached
+    // Helper to format countdown string
+    const formatResetCountdown = (resetTimeStr?: string): string => {
+      if (!resetTimeStr) return '';
+      const t = new Date(resetTimeStr).getTime();
+      if (isNaN(t)) return '';
+      const diffMs = Math.max(0, t - Date.now());
+      const totalMinutes = Math.floor(diffMs / 60000);
+      const days = Math.floor(totalMinutes / (60 * 24));
+      const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+      const mins = totalMinutes % 60;
+      if (days > 0) return ` _(resets in ${days}d ${hours}h)_`;
+      if (hours > 0) return ` _(resets in ${hours}h ${mins}m)_`;
+      return ` _(resets in ${mins}m)_`;
+    };
+
+    // Summarize Gemini vs Claude 5-Hour & Weekly limits if cached
     if (activeAccount.balances && Object.keys(activeAccount.balances).length > 0) {
-      let geminiVal: number | undefined;
-      let claudeVal: number | undefined;
+      let g5h: { val: number; resetTime?: string } | undefined;
+      let gWk: { val: number; resetTime?: string } | undefined;
+      let cWk: { val: number; resetTime?: string } | undefined;
+      let c5h: { val: number; resetTime?: string } | undefined;
+
       for (const [k, v] of Object.entries(activeAccount.balances)) {
-        const num = typeof v === 'number' ? v : (v && typeof v === 'object' && 'value' in v ? Number(v.value) : undefined);
+        let num: number | undefined;
+        let resetTime: string | undefined;
+        let windowTag: string | undefined;
+        if (typeof v === 'number') {
+          num = v;
+        } else if (v && typeof v === 'object' && 'value' in v) {
+          num = Number((v as any).value);
+          resetTime = (v as any).resetTime;
+          windowTag = (v as any).window;
+        }
         if (num === undefined || isNaN(num)) continue;
         const lower = k.toLowerCase();
         if (lower.startsWith('chat') || lower.startsWith('tab') || lower.startsWith('tap')) continue;
-        if (lower.includes('claude') || lower.includes('sonnet') || lower.includes('opus') || lower.includes('gpt')) {
-          if (claudeVal === undefined || num < claudeVal) claudeVal = num;
+
+        const isWeekly = windowTag === 'weekly' || lower.includes('weekly') || lower.includes('week');
+
+        if (lower.includes('claude') || lower.includes('sonnet') || lower.includes('opus') || lower.includes('gpt') || lower.includes('3p')) {
+          if (isWeekly) {
+            if (!cWk || num < cWk.val) cWk = { val: num, resetTime };
+          } else {
+            if (!c5h || num < c5h.val) c5h = { val: num, resetTime };
+          }
         } else if (lower.includes('gemini') || lower.includes('flash') || lower.includes('pro')) {
-          if (geminiVal === undefined || num > geminiVal) geminiVal = num;
+          if (isWeekly) {
+            if (!gWk || num < gWk.val) gWk = { val: num, resetTime };
+          } else {
+            if (!g5h || num < g5h.val) g5h = { val: num, resetTime };
+          }
         }
       }
-      if (geminiVal !== undefined || claudeVal !== undefined) {
-        md.appendMarkdown(`\n---\n\n**Quota Limits**\n\n`);
-        if (geminiVal !== undefined) {
-          md.appendMarkdown(`- **✨ Gemini (Google):** \`${geminiVal}%\`\n`);
+
+      if (g5h || gWk || cWk || c5h) {
+        md.appendMarkdown(`\n---\n\n**Quota Limits (5h & Weekly)**\n\n`);
+        if (g5h) {
+          md.appendMarkdown(`- **✨ Gemini (5-Hour):** \`${g5h.val}%\`${formatResetCountdown(g5h.resetTime)}\n`);
         }
-        if (claudeVal !== undefined) {
-          md.appendMarkdown(`- **🤖 Claude (3P):** \`${claudeVal}%\`\n`);
+        if (gWk) {
+          md.appendMarkdown(`- **📅 Gemini (Weekly):** \`${gWk.val}%\`${formatResetCountdown(gWk.resetTime)}\n`);
+        }
+        if (cWk) {
+          md.appendMarkdown(`- **🤖 Claude (Weekly):** \`${cWk.val}%\`${formatResetCountdown(cWk.resetTime)}\n`);
+        }
+        if (c5h) {
+          md.appendMarkdown(`- **⚡ Claude (5-Hour):** \`${c5h.val}%\`${formatResetCountdown(c5h.resetTime)}\n`);
         }
       }
     }

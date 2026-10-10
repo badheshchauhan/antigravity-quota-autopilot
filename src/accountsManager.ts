@@ -28,6 +28,7 @@ import { StateDbService } from './infrastructure/storage/state-db.service';
 import { AccountService } from './features/accounts/account.service';
 import { StatusBarProvider } from './presentation/providers/status-bar.provider';
 import { AccountsWebviewProvider } from './presentation/providers/accounts-webview.provider';
+import { QuotaService } from './quotaService';
 
 /**
  * Called when the extension is activated.
@@ -198,15 +199,8 @@ function registerCommands(
     logger.debug('Failed to subscribe to onDidChangeSessions', authErr);
   }
 
-  let authSyncCounter = 0;
   const activeCheckInterval = setInterval(async () => {
     try {
-      // Periodically check for new external auth sessions (every 12 seconds = every 3 ticks)
-      authSyncCounter++;
-      if (authSyncCounter % 3 === 0 && config.isAutoCaptureAccountsEnabled()) {
-        accountService.syncFromAuthenticationSessions().catch(() => {});
-      }
-
       const activeInfo = await accountService.getActiveAntigravityAccountInfo();
       const currentActive = activeInfo?.email || null;
 
@@ -353,6 +347,23 @@ function registerCommands(
       statusBarProvider.update();
     })
   );
+
+  // ── Sync Quota Details from Language Server into Accounts ──
+  const quotaService = QuotaService.getInstance();
+  const onQuotaUpdated = (quota: any) => {
+    accountService.syncFromQuotaInfo(quota).catch(() => {});
+  };
+  quotaService.on('quotaUpdated', onQuotaUpdated);
+  disposables.push({
+    dispose: () => {
+      quotaService.off('quotaUpdated', onQuotaUpdated);
+    }
+  });
+
+  const initialQuota = quotaService.getLastQuotaInfo();
+  if (initialQuota) {
+    accountService.syncFromQuotaInfo(initialQuota).catch(() => {});
+  }
 
   // ── Public Programmatic API Definition ──
   const api: AntigravityAccountApi = {

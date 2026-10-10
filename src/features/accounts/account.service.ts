@@ -21,6 +21,8 @@ import { ApiClient } from '../../core/network/api.client';
 import { OAUTH, AUTH_PROVIDERS } from '../../core/constants/app.constants';
 import { ChatResumeUtils } from '../../core/utils/chat-resume.utils';
 import { PathUtils } from '../../core/utils/path.utils';
+import { ParsedQuotaInfo } from '../../types';
+import { QuotaService } from '../../quotaService';
 
 export class AccountService {
   private _onAccountsChanged = new vscode.EventEmitter<void>();
@@ -879,11 +881,154 @@ export class AccountService {
       if (lower.startsWith('chat') || lower.startsWith('tab') || lower.startsWith('tap')) continue;
       if (typeof v === 'object' && v !== null && 'value' in v) {
         values.push(typeof v.value === 'number' ? v.value : Number(v.value));
+      } else if (typeof v === 'number') {
+        values.push(v);
       }
     }
 
     if (values.length === 0) return 100;
     return Math.min(...values);
+  }
+
+  /**
+   * Synchronizes quota and limit details directly from the Antigravity Language Server
+   * into the active account repository.
+   */
+  public async syncFromQuotaInfo(quotaInfo: ParsedQuotaInfo): Promise<Account | null> {
+    if (!quotaInfo || !quotaInfo.groups || quotaInfo.groups.length === 0) {
+      return null;
+    }
+
+    let targetEmail = quotaInfo.userEmail;
+    if (!targetEmail) {
+      targetEmail = (await this.getActiveAntigravityEmail()) || undefined;
+    }
+    if (!targetEmail) {
+      const activeInfo = await this.getActiveAntigravityAccountInfo();
+      targetEmail = activeInfo?.email || undefined;
+    }
+    if (!targetEmail) {
+      return null;
+    }
+
+    let account = await this.accountRepo.getAccount(targetEmail);
+    if (!account) {
+      const all = await this.accountRepo.getAllAccounts();
+      account = all.find(a => isEmailMatch(a.email, targetEmail!)) || null;
+      if (account) {
+        targetEmail = account.email;
+      }
+    }
+
+    // Extract canonical buckets
+    let gemini5h: { value: number; resetTime?: string; window: string; disabled?: boolean } | null = null;
+    let geminiWeekly: { value: number; resetTime?: string; window: string; disabled?: boolean } | null = null;
+    let claude5h: { value: number; resetTime?: string; window: string; disabled?: boolean } | null = null;
+    let claudeWeekly: { value: number; resetTime?: string; window: string; disabled?: boolean } | null = null;
+
+    for (const group of quotaInfo.groups) {
+      const groupName = (group.displayName || '').toLowerCase();
+      const isGeminiGroup = groupName.includes('gemini');
+
+      for (const bucket of group.buckets) {
+        const frac = bucket.disabled ? 0 : (typeof bucket.remainingFraction === 'number' ? bucket.remainingFraction : 1.0);
+        const pct = Math.round(frac * 1000) / 10;
+        const bId = (bucket.bucketId || '').toLowerCase();
+        const bName = (bucket.displayName || '').toLowerCase();
+        const isWeekly = bucket.window === 'weekly' || bId.includes('weekly') || bName.includes('week');
+
+        const entry = {
+          value: pct,
+          resetTime: bucket.resetTime,
+          window: isWeekly ? 'weekly' : '5h',
+          disabled: bucket.disabled,
+        };
+
+        if (isGeminiGroup || bId.includes('gemini') || bName.includes('gemini')) {
+          if (isWeekly) {
+            if (!geminiWeekly || pct < geminiWeekly.value) geminiWeekly = entry;
+          } else {
+            if (!gemini5h || pct < gemini5h.value) gemini5h = entry;
+          }
+        } else {
+          if (isWeekly) {
+            if (!claudeWeekly || pct < claudeWeekly.value) claudeWeekly = entry;
+          } else {
+            if (!claude5h || pct < claude5h.value) claude5h = entry;
+          }
+        }
+      }
+    }
+
+    const balances: Record<string, any> = account ? { ...account.balances } : {};
+
+    if (gemini5h) {
+      balances['gemini-5h'] = gemini5h;
+      balances['gemini-3.7-flash'] = { value: gemini5h.value, resetTime: gemini5h.resetTime, window: '5h' };
+      balances['gemini-3.7-flash-tiered'] = { value: gemini5h.value, resetTime: gemini5h.resetTime, window: '5h' };
+      balances['gemini-3.1-pro'] = { value: gemini5h.value, resetTime: gemini5h.resetTime, window: '5h' };
+    }
+    if (geminiWeekly) {
+      balances['gemini-weekly'] = geminiWeekly;
+    }
+    if (claude5h) {
+      balances['claude-5h'] = claude5h;
+      balances['3p-5h'] = claude5h;
+    }
+    if (claudeWeekly) {
+      balances['claude-weekly'] = claudeWeekly;
+      balances['3p-weekly'] = claudeWeekly;
+      balances['claude-3.7-sonnet'] = { value: claudeWeekly.value, resetTime: claudeWeekly.resetTime, window: 'weekly' };
+      balances['claude-3.5-sonnet'] = { value: claudeWeekly.value, resetTime: claudeWeekly.resetTime, window: 'weekly' };
+    }
+
+    // Determine plan
+    let plan = account?.plan || AccountPlan.PREMIUM;
+    if (quotaInfo.planName) {
+      const p = quotaInfo.planName.toLowerCase();
+      if (p.includes('ultra')) plan = AccountPlan.ULTRA;
+      else if (p.includes('free')) plan = AccountPlan.FREE;
+      else if (p.includes('pro') || p.includes('premium')) plan = AccountPlan.PREMIUM;
+    }
+
+    // Determine status
+    let status = AccountStatus.ACTIVE;
+    if (gemini5h && gemini5h.value === 0 && (!claudeWeekly || claudeWeekly.value === 0)) {
+      status = AccountStatus.DEPLETED;
+    } else if (gemini5h && gemini5h.value < 20) {
+      status = AccountStatus.LOW_BALANCE;
+    }
+
+    const nowIso = new Date().toISOString();
+
+    if (!account) {
+      await this.accountRepo.saveAccount({
+        email: targetEmail,
+        name: quotaInfo.userName || targetEmail.split('@')[0],
+        accessToken: '',
+        refreshToken: '',
+        expiresAt: 0,
+      });
+      await this.accountRepo.updateAccount(targetEmail, {
+        balances,
+        plan,
+        status,
+        lastRefreshedAt: nowIso,
+      });
+      Logger.getInstance().info(`[QuotaSync] Created account ${targetEmail} from Language Server quota`);
+    } else {
+      await this.accountRepo.updateAccount(targetEmail, {
+        balances,
+        plan,
+        status,
+        name: account.name || quotaInfo.userName || targetEmail.split('@')[0],
+        lastRefreshedAt: nowIso,
+      });
+      Logger.getInstance().info(`[QuotaSync] Updated account ${targetEmail} from Language Server quota`);
+    }
+
+    this._onAccountsChanged.fire();
+    return await this.accountRepo.getAccount(targetEmail);
   }
 
   /**
@@ -915,6 +1060,17 @@ export class AccountService {
     }
     this._lastActiveQuotaCheckTime = now;
 
+    // Check if Language Server quota is already available or can be retrieved
+    const syncFromLanguageServer = async (): Promise<Account | null> => {
+      try {
+        const quota = QuotaService.getInstance().getLastQuotaInfo() || await QuotaService.getInstance().refresh(false);
+        if (quota) {
+          return await this.syncFromQuotaInfo(quota);
+        }
+      } catch {}
+      return null;
+    };
+
     const activeInfo = await this.getActiveAntigravityAccountInfo();
     let tokens = activeInfo?.tokens || await this.accountRepo.getTokens(activeEmail);
     if (activeInfo?.tokens) {
@@ -932,7 +1088,10 @@ export class AccountService {
       }
     }
 
-    if (!tokens?.accessToken) return account;
+    if (!tokens?.accessToken) {
+      const lsAccount = await syncFromLanguageServer();
+      return lsAccount || account;
+    }
 
     try {
       const balanceInfo = await this.balanceService.getBalanceInfo(tokens.accessToken, {
@@ -947,6 +1106,12 @@ export class AccountService {
 
       if (balanceInfo.isDepleted) {
         balanceInfo.balances = this.balanceService.createExhaustedBalances(account.balances);
+      }
+
+      // If external API returned empty balances, fall back to local Language Server quota
+      if (Object.keys(balanceInfo.balances || {}).length === 0) {
+        const lsAccount = await syncFromLanguageServer();
+        if (lsAccount) return lsAccount;
       }
 
       const preferredModel = await this.accountRepo.getPreferredModel();
@@ -978,7 +1143,8 @@ export class AccountService {
       return await this.accountRepo.getAccount(activeEmail);
     } catch (err) {
       Logger.getInstance().error(`Fast refresh failed for active account ${activeEmail}`, err);
-      return account;
+      const lsAccount = await syncFromLanguageServer();
+      return lsAccount || account;
     }
   }
 

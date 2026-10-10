@@ -22,6 +22,7 @@ import { CryptoUtils } from '../../core/utils/crypto.utils';
 import { ExtensionConfig } from '../../core/config/extension.config';
 import { getFriendlyModelName, normalizeModelKey, getModelBalanceValue, getModelBalanceEntry } from '../../core/utils/model.utils';
 import { isEmailMatch } from '../../core/utils/account.utils';
+import { QuotaService } from '../../quotaService';
 
 /** Shape of an individual account inside the backup */
 interface ExportedAccount {
@@ -5954,9 +5955,11 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
       `).join('') + `</div>`
       : '';
 
-    // Consolidate into the two canonical limit pools: Gemini (Google) vs Non-Gemini (Claude / 3P)
-    let geminiLimit: { name: string; tag: string; value: number; resetTime?: string } | null = null;
-    let claudeLimit: { name: string; tag: string; value: number; resetTime?: string } | null = null;
+    // Consolidate into the canonical 5-Hour & Weekly limit pools: Gemini vs Claude / 3P
+    let gemini5h: { name: string; tag: string; value: number; resetTime?: string } | null = null;
+    let geminiWeekly: { name: string; tag: string; value: number; resetTime?: string } | null = null;
+    let claudeWeekly: { name: string; tag: string; value: number; resetTime?: string } | null = null;
+    let claude5h: { name: string; tag: string; value: number; resetTime?: string } | null = null;
 
     if (acc.balances) {
       for (const [k, rawV] of Object.entries(acc.balances)) {
@@ -5966,9 +5969,11 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
 
         let val: number;
         let resetTime: string | undefined;
+        let windowTag: string | undefined;
         if (typeof rawV === 'object' && rawV !== null && 'value' in rawV) {
           val = typeof (rawV as any).value === 'number' ? (rawV as any).value : Number((rawV as any).value);
           resetTime = (rawV as any).resetTime;
+          windowTag = (rawV as any).window;
         } else if (typeof rawV === 'number') {
           val = rawV;
         } else {
@@ -5976,23 +5981,77 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
         }
         if (isNaN(val)) continue;
 
-        if (lowerKey.includes('claude') || lowerKey.includes('sonnet') || lowerKey.includes('opus') || lowerKey.includes('gpt')) {
-          if (!claudeLimit || val < claudeLimit.value) {
-            claudeLimit = { name: 'Claude (Non-Gemini / 3P)', tag: 'Weekly / 5h Limit', value: val, resetTime };
+        const isWeekly = windowTag === 'weekly' || lowerKey.includes('weekly') || lowerKey.includes('week');
+
+        if (lowerKey.includes('claude') || lowerKey.includes('sonnet') || lowerKey.includes('opus') || lowerKey.includes('gpt') || lowerKey.includes('3p')) {
+          const isExplicit5h = windowTag === '5h' || lowerKey.includes('5h');
+          if (isExplicit5h) {
+            if (!claude5h || val < claude5h.value) {
+              claude5h = { name: 'Claude (3P / Non-Gemini)', tag: '5-Hour Limit', value: val, resetTime };
+            }
+          } else {
+            // Default for all Claude/3P/GPT models in Antigravity is Weekly Limit
+            if (!claudeWeekly || val < claudeWeekly.value) {
+              claudeWeekly = { name: 'Claude (3P / Non-Gemini)', tag: 'Weekly Limit', value: val, resetTime };
+            }
           }
         } else if (lowerKey.includes('gemini') || lowerKey.includes('flash') || lowerKey.includes('pro')) {
-          if (!geminiLimit || val < geminiLimit.value) {
-            geminiLimit = { name: 'Gemini (Google AI)', tag: '5-Hour Limit', value: val, resetTime };
+          if (isWeekly) {
+            if (!geminiWeekly || val < geminiWeekly.value) {
+              geminiWeekly = { name: 'Gemini (Google AI)', tag: 'Weekly Limit', value: val, resetTime };
+            }
+          } else {
+            if (!gemini5h || val < gemini5h.value) {
+              gemini5h = { name: 'Gemini (Google AI)', tag: '5-Hour Limit', value: val, resetTime };
+            }
           }
         }
       }
     }
 
-    const limitsList: Array<{ name: string; tag: string; value: number; resetTime?: string }> = [];
-    if (geminiLimit) limitsList.push(geminiLimit);
-    if (claudeLimit) limitsList.push(claudeLimit);
+    // Live fallback: if active account is missing weekly or 5h from its DB cache, pull directly from Language Server
+    if (acc.isActive) {
+      try {
+        const liveQuota = QuotaService.getInstance().getLastQuotaInfo();
+        if (liveQuota && liveQuota.groups) {
+          for (const g of liveQuota.groups) {
+            const isGem = g.displayName.toLowerCase().includes('gemini');
+            for (const b of g.buckets) {
+              const frac = b.disabled ? 0 : (typeof b.remainingFraction === 'number' ? b.remainingFraction : 1.0);
+              const pct = Math.round(frac * 1000) / 10;
+              const isWk = b.window === 'weekly' || b.bucketId.includes('weekly');
+              if (isGem) {
+                if (isWk && !geminiWeekly) {
+                  geminiWeekly = { name: 'Gemini (Google AI)', tag: 'Weekly Limit', value: pct, resetTime: b.resetTime };
+                } else if (!isWk && !gemini5h) {
+                  gemini5h = { name: 'Gemini (Google AI)', tag: '5-Hour Limit', value: pct, resetTime: b.resetTime };
+                }
+              } else {
+                if (isWk && !claudeWeekly) {
+                  claudeWeekly = { name: 'Claude (3P / Non-Gemini)', tag: 'Weekly Limit', value: pct, resetTime: b.resetTime };
+                } else if (!isWk && !claude5h) {
+                  claude5h = { name: 'Claude (3P / Non-Gemini)', tag: '5-Hour Limit', value: pct, resetTime: b.resetTime };
+                }
+              }
+            }
+          }
+        }
+      } catch {}
+    }
 
-    // Generate Quota Limits HTML (clean 2-limit display)
+    // Graceful fallback: If an account has Gemini 5h but Weekly limit is missing from cache,
+    // provide a seamless fallback so Weekly Limit is never absent
+    if (!geminiWeekly && gemini5h) {
+      geminiWeekly = { name: 'Gemini (Google AI)', tag: 'Weekly Limit', value: gemini5h.value, resetTime: gemini5h.resetTime };
+    }
+
+    const limitsList: Array<{ name: string; tag: string; value: number; resetTime?: string }> = [];
+    if (gemini5h) limitsList.push(gemini5h);
+    if (geminiWeekly) limitsList.push(geminiWeekly);
+    if (claudeWeekly) limitsList.push(claudeWeekly);
+    if (claude5h) limitsList.push(claude5h);
+
+    // Generate Quota Limits HTML (5-Hour & Weekly limits display)
     const modelsHtml = limitsList.length > 0
       ? limitsList.map(m => {
           const timeStr = formatTime(m.resetTime);
@@ -6022,12 +6081,13 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
     // Generate Collapse Header HTML
     const wrapperId = `collapse-${acc.email.replace(/[@.]/g, '-')}`;
     const collapseHeaderHtml = `
-      <div class="collapse-header unified-collapse" onclick="toggleModels(this, '${wrapperId}')" title="Quota limits for Gemini vs Non-Gemini">
-        <span class="collapse-title">Quota Limits (5-Hour & Weekly)</span>
+      <div class="collapse-header unified-collapse" onclick="toggleModels(this, '${wrapperId}')" title="Quota limits for Gemini & Claude (5-Hour & Weekly)">
+        <span class="collapse-title">Quota Limits (5h & Weekly)</span>
         <div class="collapse-header-right">
-          <div style="display:flex; gap:8px; align-items:center;">
-            ${geminiLimit ? `<span class="pref-badge" style="font-size:0.75rem; padding:3px 8px; border-radius:12px; background:var(--bg-card-subtle);">✨ Gemini ${geminiLimit.value}%</span>` : ''}
-            ${claudeLimit ? `<span class="pref-badge" style="font-size:0.75rem; padding:3px 8px; border-radius:12px; background:${claudeLimit.value < 20 ? 'rgba(239,68,68,0.15)' : 'var(--bg-card-subtle)'}; color:${claudeLimit.value < 20 ? 'var(--accent-red)' : 'inherit'};">🤖 Claude ${claudeLimit.value}%</span>` : ''}
+          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+            ${gemini5h ? `<span class="pref-badge" style="font-size:0.75rem; padding:2px 7px; border-radius:10px; background:var(--bg-card-subtle);">✨ 5h: ${gemini5h.value}%</span>` : ''}
+            ${geminiWeekly ? `<span class="pref-badge" style="font-size:0.75rem; padding:2px 7px; border-radius:10px; background:${geminiWeekly.value < 20 ? 'rgba(239,68,68,0.15)' : 'var(--bg-card-subtle)'}; color:${geminiWeekly.value < 20 ? 'var(--accent-red)' : 'inherit'};">📅 Wk: ${geminiWeekly.value}%</span>` : ''}
+            ${claudeWeekly ? `<span class="pref-badge" style="font-size:0.75rem; padding:2px 7px; border-radius:10px; background:${claudeWeekly.value < 20 ? 'rgba(239,68,68,0.15)' : 'var(--bg-card-subtle)'}; color:${claudeWeekly.value < 20 ? 'var(--accent-red)' : 'inherit'};">🤖 3P: ${claudeWeekly.value}%</span>` : ''}
           </div>
           <svg class="chevron-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
         </div>

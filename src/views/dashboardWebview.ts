@@ -31,6 +31,8 @@ export class DashboardWebviewPanel {
     if (DashboardWebviewPanel.currentPanel) {
       DashboardWebviewPanel.currentPanel._panel.reveal(column);
       DashboardWebviewPanel.currentPanel.updateContent();
+      DashboardWebviewPanel.currentPanel._quotaService.refresh(false).catch(() => {});
+      DashboardWebviewPanel.currentPanel.postAccountsUpdate().catch(() => {});
       return;
     }
 
@@ -66,7 +68,10 @@ export class DashboardWebviewPanel {
     this._taskSessionService = taskSessionService;
     this._autoAcceptService = autoAcceptService;
 
-    this.updateContent();
+    this.updateContent().then(() => {
+      this.postAccountsUpdate().catch(() => {});
+      this._quotaService.refresh(false).catch(() => {});
+    });
 
     this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
 
@@ -95,6 +100,38 @@ export class DashboardWebviewPanel {
     this._panel.webview.onDidReceiveMessage(
       async (message) => {
         switch (message.command) {
+          case 'dashboardReady': {
+            await this.postAccountsUpdate();
+            this._panel.webview.postMessage({
+              type: 'updateActivityHistory',
+              history: this._taskSessionService.getHistory(),
+              todaySummary: this._taskSessionService.getTodaySummary(),
+            });
+            this._panel.webview.postMessage({
+              type: 'updateAutoAccept',
+              enabled: this._autoAcceptService.getStatus(),
+              choice: this._autoAcceptService.getChoice(),
+            });
+
+            let currentQuota = this._quotaService.getLastQuotaInfo();
+            if (currentQuota) {
+              this._panel.webview.postMessage({
+                type: 'updateQuota',
+                data: currentQuota,
+              });
+            }
+
+            // Immediately discover & refresh live language server data
+            this._quotaService.refresh(false).then((liveQuota) => {
+              if (liveQuota) {
+                this._panel.webview.postMessage({
+                  type: 'updateQuota',
+                  data: liveQuota,
+                });
+              }
+            }).catch(() => {});
+            break;
+          }
           case 'refresh':
             try {
               const res = await this._quotaService.refresh(true);
@@ -1980,7 +2017,17 @@ export class DashboardWebviewPanel {
       const statusText = document.getElementById('connectionStatusText');
 
       if (!quota || !quota.groups || quota.groups.length === 0) {
-        if (container) container.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted); background: var(--bg-card); border-radius: var(--radius-lg); border: 1px dashed var(--border-subtle);">Connecting to Antigravity Language Server...</div>';
+        if (container) {
+          container.innerHTML = 
+            '<div style="padding: 48px; text-align: center; color: var(--text-muted); background: var(--bg-card); border-radius: var(--radius-lg); border: 1px dashed var(--border-subtle);">' +
+            '  <div style="font-size: 32px; margin-bottom: 12px;">⚡</div>' +
+            '  <div style="font-size: 15px; font-weight: 700; color: var(--text-main); margin-bottom: 6px;">Connecting to Antigravity Language Server...</div>' +
+            '  <div style="font-size: 12px; margin-bottom: 18px; max-width: 420px; margin-left: auto; margin-right: auto; line-height: 1.5;">' +
+            '    Detecting active Language Server process and querying model limits. If this takes longer than a few seconds, click below to retry discovery.' +
+            '  </div>' +
+            '  <button class="btn btn-primary" onclick="refreshAll()">🔄 Retry Discovery Now</button>' +
+            '</div>';
+        }
         return;
       }
 
@@ -1994,7 +2041,7 @@ export class DashboardWebviewPanel {
       // Calculate Summary Metrics
       let totalWeeklyFrac = 0, countWeekly = 0;
       let totalFiveFrac = 0, countFive = 0;
-      let earliestReset: { time: number; str: string } | null = null;
+      let earliestReset = null;
 
       for (const g of quota.groups) {
         for (const b of g.buckets) {
@@ -2136,6 +2183,38 @@ export class DashboardWebviewPanel {
         }
       }
 
+      // Proactively bind active account into header and metric cards
+      const activeAcc = (accounts || []).find(a => activeEmail && a.email.toLowerCase() === activeEmail.toLowerCase());
+      if (activeAcc) {
+        const headerEmail = document.getElementById('headerAccountEmail');
+        const headerAvatar = document.getElementById('headerAvatar');
+        const userPlanVal = document.getElementById('userPlanVal');
+        if (headerEmail && (!headerEmail.textContent || headerEmail.textContent.includes('Detecting'))) {
+          headerEmail.textContent = activeAcc.email;
+        }
+        if (headerAvatar && (!headerAvatar.textContent || headerAvatar.textContent === '?')) {
+          headerAvatar.textContent = (activeAcc.name || activeAcc.email).charAt(0).toUpperCase();
+        }
+        if (userPlanVal && (!userPlanVal.textContent || userPlanVal.textContent.includes('Free / Pro'))) {
+          userPlanVal.textContent = (activeAcc.plan || 'PRO').toUpperCase();
+        }
+        if (!currentQuota && activeAcc.balances) {
+          let g5h = 100, gWk = 100;
+          for (const [k, v] of Object.entries(activeAcc.balances)) {
+            const val = typeof v === 'number' ? v : (v && typeof v.value === 'number' ? v.value : 100);
+            const isWk = (v && v.window === 'weekly') || k.includes('weekly');
+            if (k.includes('gemini') || k.includes('flash') || k.includes('pro')) {
+              if (isWk) gWk = Math.min(gWk, val);
+              else g5h = Math.min(g5h, val);
+            }
+          }
+          const weeklyEl = document.getElementById('weeklyAverageVal');
+          if (weeklyEl && (weeklyEl.textContent === '--%' || !weeklyEl.textContent)) weeklyEl.textContent = Math.round(gWk) + '%';
+          const fiveEl = document.getElementById('fiveHourAverageVal');
+          if (fiveEl && (fiveEl.textContent === '--%' || !fiveEl.textContent)) fiveEl.textContent = Math.round(g5h) + '%';
+        }
+      }
+
       if (!grid) return;
 
       const filtered = (accounts || []).filter(a => {
@@ -2162,27 +2241,47 @@ export class DashboardWebviewPanel {
         const initial = (acc.name || acc.email).charAt(0).toUpperCase();
         const planText = (acc.plan || 'Free').toUpperCase();
 
-        // Canonical Quota Limits Mini-bars (Gemini vs Non-Gemini)
+        // Canonical Quota Limits Mini-bars (Gemini vs Non-Gemini, 5-Hour & Weekly)
         let balancesHtml = '';
         if (acc.balances && Object.keys(acc.balances).length > 0) {
-          let gVal: number | undefined;
-          let cVal: number | undefined;
+          let g5h, gWk, cWk, c5h;
           for (const [mKey, mVal] of Object.entries(acc.balances)) {
             let val = 100;
-            if (typeof mVal === 'number') val = mVal;
-            else if (typeof mVal === 'object' && mVal && 'value' in mVal) val = (mVal as any).value;
+            let windowTag = '';
+            if (typeof mVal === 'number') {
+              val = mVal;
+            } else if (typeof mVal === 'object' && mVal && 'value' in mVal) {
+              val = mVal.value;
+              windowTag = mVal.window || '';
+            }
             const pct = val > 1 ? Math.min(100, Math.max(0, Math.round(val))) : Math.round(val * 100);
             const lower = mKey.toLowerCase();
             if (lower.startsWith('chat') || lower.startsWith('tap') || lower.startsWith('tab')) continue;
-            if (lower.includes('claude') || lower.includes('sonnet') || lower.includes('opus') || lower.includes('gpt')) {
-              if (cVal === undefined || pct < cVal) cVal = pct;
+
+            const isWeekly = windowTag === 'weekly' || lower.includes('weekly') || lower.includes('week');
+
+            if (lower.includes('claude') || lower.includes('sonnet') || lower.includes('opus') || lower.includes('gpt') || lower.includes('3p')) {
+              if (isWeekly) {
+                if (cWk === undefined || pct < cWk) cWk = pct;
+              } else {
+                if (c5h === undefined || pct < c5h) c5h = pct;
+              }
             } else if (lower.includes('gemini') || lower.includes('flash') || lower.includes('pro')) {
-              if (gVal === undefined || pct < gVal) gVal = pct;
+              if (isWeekly) {
+                if (gWk === undefined || pct < gWk) gWk = pct;
+              } else {
+                if (g5h === undefined || pct < g5h) g5h = pct;
+              }
             }
           }
+          if (gWk === undefined && g5h !== undefined) {
+            gWk = g5h;
+          }
           const items = [];
-          if (gVal !== undefined) items.push({ name: 'Gemini (5h)', pct: gVal });
-          if (cVal !== undefined) items.push({ name: 'Claude (3P)', pct: cVal });
+          if (g5h !== undefined) items.push({ name: 'Gemini (5h)', pct: g5h });
+          if (gWk !== undefined) items.push({ name: 'Gemini (Wk)', pct: gWk });
+          if (cWk !== undefined) items.push({ name: 'Claude (Wk)', pct: cWk });
+          if (c5h !== undefined) items.push({ name: 'Claude (5h)', pct: c5h });
 
           for (const item of items) {
             const frac = item.pct / 100;
@@ -2462,6 +2561,11 @@ export class DashboardWebviewPanel {
     setInterval(() => {
       if (currentQuota) renderQuotas(currentQuota);
     }, 20000);
+
+    // Notify host extension that webview is mounted and ready for latest data
+    try {
+      vscode.postMessage({ command: 'dashboardReady' });
+    } catch (e) {}
   </script>
 </body>
 </html>`;

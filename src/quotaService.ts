@@ -66,14 +66,25 @@ export class QuotaService extends EventEmitter {
     }
   }
 
+  private refreshPromise: Promise<ParsedQuotaInfo | null> | null = null;
+
   public async refresh(forceFresh: boolean = false): Promise<ParsedQuotaInfo | null> {
-    if (this.isRefreshing) {
+    if (this.refreshPromise) {
       if (!forceFresh) {
-        return this.lastQuotaInfo;
+        return this.lastQuotaInfo || this.refreshPromise;
       }
-      // Wait briefly for in-flight polling to finish before running fresh discovery
-      await new Promise((r) => setTimeout(r, 400));
+      try {
+        await this.refreshPromise;
+      } catch {}
     }
+
+    this.refreshPromise = this.doRefresh(forceFresh).finally(() => {
+      this.refreshPromise = null;
+    });
+    return this.refreshPromise;
+  }
+
+  private async doRefresh(forceFresh: boolean = false): Promise<ParsedQuotaInfo | null> {
     this.isRefreshing = true;
 
     try {
@@ -115,7 +126,7 @@ export class QuotaService extends EventEmitter {
       if (connection) {
         this.log(`Connection established! Using port ${connection.port}, PID ${connection.pid}`);
         this.cachedConnection = connection;
-        const quota = await this.fetchQuotaFromEndpoint(
+        const quota = connection.initialQuota || await this.fetchQuotaFromEndpoint(
           connection.port,
           connection.csrfToken,
           2500
@@ -179,6 +190,7 @@ export class QuotaService extends EventEmitter {
           csrfToken: candidate.csrfToken,
           port: winner.port,
           isIde: candidate.isIde,
+          initialQuota: winner.res,
         };
       } catch {
         this.log(`Candidate PID ${candidate.pid} failed on all ports.`);
@@ -345,6 +357,8 @@ export class QuotaService extends EventEmitter {
     return candidates;
   }
 
+  private static readonly IGNORED_PORTS = new Set([9333, 9222, 9229]);
+
   private async getListeningPortsForPid(pid: string): Promise<number[]> {
     const platform = os.platform();
     const ports: number[] = [];
@@ -368,7 +382,7 @@ export class QuotaService extends EventEmitter {
             const matches = [...lsofOut.matchAll(/:(\d+)\s+\(LISTEN\)/g)];
             for (const m of matches) {
               const p = parseInt(m[1], 10);
-              if (!isNaN(p) && !ports.includes(p)) {
+              if (!isNaN(p) && !QuotaService.IGNORED_PORTS.has(p) && !ports.includes(p)) {
                 ports.push(p);
               }
             }
@@ -388,7 +402,7 @@ export class QuotaService extends EventEmitter {
             const matches = [...netstatOut.matchAll(/127\.0\.0\.1:(\d+)/g)];
             for (const m of matches) {
               const p = parseInt(m[1], 10);
-              if (!isNaN(p) && !ports.includes(p)) {
+              if (!isNaN(p) && !QuotaService.IGNORED_PORTS.has(p) && !ports.includes(p)) {
                 ports.push(p);
               }
             }
@@ -410,7 +424,7 @@ export class QuotaService extends EventEmitter {
             const match = trimmed.match(/127\.0\.0\.1:(\d+)/);
             if (match) {
               const p = parseInt(match[1], 10);
-              if (!isNaN(p) && !ports.includes(p)) {
+              if (!isNaN(p) && !QuotaService.IGNORED_PORTS.has(p) && !ports.includes(p)) {
                 ports.push(p);
               }
             }

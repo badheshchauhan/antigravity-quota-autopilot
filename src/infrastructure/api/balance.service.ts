@@ -71,13 +71,37 @@ export class BalanceService {
     }
 
     try {
-      // ── Strategy 1 (Primary & Fastest): Direct fetchAvailableModels ──
-      // This is the active, high-speed API that returns Gemini model quotas and timers in ~300ms.
+      // ── Strategy 1 (Primary): Retrieve User Quota Summary (Weekly & 5-Hour pools) ──
       const effectiveProjectId = options?.projectId || result.projectId || 'aicode-consumers';
       result.projectId = effectiveProjectId;
-      Logger.getInstance().debug(`Querying available model quotas directly for project ${effectiveProjectId} (Primary Strategy)...`);
+      Logger.getInstance().debug(`Querying quota summary & available models for project ${effectiveProjectId}...`);
+
+      const summaryBalances = await this.tryRetrieveUserQuotaSummary(accessToken, effectiveProjectId, options?.signal);
+      if (options?.signal?.aborted) {
+        result.hasError = true;
+        return result;
+      }
+      if (summaryBalances && (summaryBalances as any).__isRateLimited) {
+        result.isRateLimited = true;
+        result.hasError = true;
+        return result;
+      }
+      if (summaryBalances && (summaryBalances as any).__isDepleted) {
+        delete (summaryBalances as any).__isDepleted;
+        result.isDepleted = true;
+        result.status = AccountStatus.DEPLETED;
+        result.balances = summaryBalances;
+        return result;
+      }
+
+      // Also query available models to enrich specific model balances
       const modelBalances = await this.tryFetchAvailableModels(accessToken, effectiveProjectId, options?.signal);
       if (options?.signal?.aborted) {
+        result.hasError = true;
+        return result;
+      }
+      if (modelBalances && (modelBalances as any).__isRateLimited && Object.keys(summaryBalances).length === 0) {
+        result.isRateLimited = true;
         result.hasError = true;
         return result;
       }
@@ -85,16 +109,18 @@ export class BalanceService {
         delete (modelBalances as any).__isDepleted;
         result.isDepleted = true;
         result.status = AccountStatus.DEPLETED;
-        result.balances = modelBalances;
-        return result;
       }
-      if (modelBalances && (modelBalances as any).__isRateLimited) {
-        result.isRateLimited = true;
-        result.hasError = true;
-        return result;
-      }
-      if (modelBalances && Object.keys(modelBalances).length > 0) {
-        result.balances = modelBalances;
+
+      const mergedBalances = { ...summaryBalances, ...modelBalances };
+      if (summaryBalances['gemini-weekly']) mergedBalances['gemini-weekly'] = summaryBalances['gemini-weekly'];
+      if (summaryBalances['gemini-5h']) mergedBalances['gemini-5h'] = summaryBalances['gemini-5h'];
+      if (summaryBalances['claude-weekly']) mergedBalances['claude-weekly'] = summaryBalances['claude-weekly'];
+      if (summaryBalances['claude-5h']) mergedBalances['claude-5h'] = summaryBalances['claude-5h'];
+      if (summaryBalances['3p-weekly']) mergedBalances['3p-weekly'] = summaryBalances['3p-weekly'];
+      if (summaryBalances['3p-5h']) mergedBalances['3p-5h'] = summaryBalances['3p-5h'];
+
+      if (Object.keys(mergedBalances).length > 0) {
+        result.balances = mergedBalances;
         return result;
       }
 
@@ -239,6 +265,105 @@ export class BalanceService {
       Logger.getInstance().debug('Fallback loadCodeAssist failed', e);
       return null;
     }
+  }
+
+  private async tryRetrieveUserQuotaSummary(accessToken: string, projectId?: string, signal?: AbortSignal): Promise<Record<string, any>> {
+    const balances: Record<string, any> = {};
+    const effectiveProject = projectId || 'aicode-consumers';
+    const body = { project: effectiveProject };
+
+    for (const url of API.RETRIEVE_USER_QUOTA_SUMMARY_URLS) {
+      if (signal?.aborted) return balances;
+      try {
+        Logger.getInstance().debug(`Attempting retrieveUserQuotaSummary at ${url} with project ${effectiveProject}...`);
+        const data = await ApiClient.request<any>(url, {
+          method: 'POST',
+          body,
+          accessToken,
+          signal
+        });
+
+        const groups = data?.response?.groups || data?.groups;
+        if (Array.isArray(groups) && groups.length > 0) {
+          let hasGeminiQuota = false;
+          let geminiCount = 0;
+
+          for (const group of groups) {
+            const groupName = (group.displayName || '').toLowerCase();
+            const isGeminiGroup = groupName.includes('gemini');
+
+            for (const bucket of group.buckets || []) {
+              const frac = bucket.disabled ? 0 : (typeof bucket.remainingFraction === 'number' ? bucket.remainingFraction : 1.0);
+              const value = Math.round(frac * 100);
+              const bId = (bucket.bucketId || '').toLowerCase();
+              const isWeekly = bucket.window === 'weekly' || bId.includes('weekly');
+
+              const entry = {
+                value,
+                resetTime: bucket.resetTime,
+                window: isWeekly ? 'weekly' : '5h',
+                disabled: bucket.disabled,
+              };
+
+              if (bucket.bucketId) {
+                balances[bucket.bucketId] = entry;
+              }
+
+              if (isGeminiGroup || bId.includes('gemini')) {
+                geminiCount++;
+                if (value > 0) hasGeminiQuota = true;
+                if (isWeekly) {
+                  balances['gemini-weekly'] = entry;
+                } else {
+                  balances['gemini-5h'] = entry;
+                  balances['gemini-2.5-flash'] = { value, resetTime: bucket.resetTime, window: '5h' };
+                  balances['gemini-2.5-pro'] = { value, resetTime: bucket.resetTime, window: '5h' };
+                  balances['gemini-3.8-flash'] = { value, resetTime: bucket.resetTime, window: '5h' };
+                }
+              } else {
+                if (isWeekly) {
+                  balances['claude-weekly'] = entry;
+                  balances['3p-weekly'] = entry;
+                  balances['claude-3.5-sonnet'] = { value, resetTime: bucket.resetTime, window: 'weekly' };
+                  balances['claude-3.7-sonnet'] = { value, resetTime: bucket.resetTime, window: 'weekly' };
+                } else {
+                  balances['claude-5h'] = entry;
+                  balances['3p-5h'] = entry;
+                }
+              }
+            }
+          }
+
+          if (Object.keys(balances).length > 0) {
+            Logger.getInstance().info(`Successfully fetched quota summary buckets from ${url}`);
+            if (geminiCount > 0 && !hasGeminiQuota) {
+              (balances as any).__isDepleted = true;
+            }
+            return balances;
+          }
+        }
+      } catch (e: any) {
+        if (signal?.aborted || (e instanceof ApiError && e.status === 499)) {
+          return balances;
+        }
+        if (e instanceof ApiError && e.status === 429) {
+          const isExhausted = e.message && (
+            e.message.includes('RESOURCE_EXHAUSTED') ||
+            e.message.includes('Resource has been exhausted') ||
+            e.message.includes('quota') ||
+            e.message.includes('exhausted')
+          );
+          if (isExhausted) {
+            Logger.getInstance().warn(`retrieveUserQuotaSummary indicates quota exhausted (429) at ${url}`);
+            return { __isDepleted: true };
+          }
+          Logger.getInstance().warn(`retrieveUserQuotaSummary hit rate limit (429) at ${url}`);
+          return { __isRateLimited: true };
+        }
+        Logger.getInstance().debug(`retrieveUserQuotaSummary failed at ${url}: ${e.message}`);
+      }
+    }
+    return balances;
   }
 
   private async tryFetchAvailableModels(accessToken: string, projectId?: string, signal?: AbortSignal): Promise<Record<string, any>> {

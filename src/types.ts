@@ -26,6 +26,7 @@ export interface LanguageServerConnection {
   csrfToken: string;
   port: number;
   isIde?: boolean;
+  initialQuota?: QuotaSummaryResponse;
 }
 
 export interface ParsedQuotaInfo {

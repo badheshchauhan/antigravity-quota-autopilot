@@ -105,6 +105,8 @@ export class StateDbService {
         { key: STATE_DB_KEYS.OAUTH_TOKEN, value: oauthToken },
         { key: STATE_DB_KEYS.USER_STATUS, value: userStatus },
         { key: STATE_DB_KEYS.ONBOARDING, value: 'true' },
+        { key: 'antigravity.hasShownIdeMigrationNudge', value: 'true' },
+        { key: 'google.antigravity', value: JSON.stringify({ 'antigravity.hasShownIdeMigrationNudge': true }) },
         { key: STATE_DB_KEYS.LEGACY, value: null }, // delete
       ];
       if (enterpriseEntry) {

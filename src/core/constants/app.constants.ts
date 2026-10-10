@@ -33,6 +33,10 @@ export const API = {
   LOAD_CODE_ASSIST: 'https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist',
   FETCH_CREDITS: 'https://cloudcode-pa.googleapis.com/v1internal:fetchCredits',
   DAILY_LOAD_CODE_ASSIST: 'https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist',
+  RETRIEVE_USER_QUOTA_SUMMARY_URLS: [
+    'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary',
+    'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary',
+  ],
   FETCH_MODELS_URLS: [
     'https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
     'https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
